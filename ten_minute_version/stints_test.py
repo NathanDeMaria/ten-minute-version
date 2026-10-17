@@ -1,5 +1,8 @@
+from .opponents import GENERIC
 from .stints import GAME_SCHEMA, STINT_SCHEMA, game_stints, season_tables
 from .testing import (
+    AWAY,
+    HOME,
     defensive_rebound,
     foul,
     free_throw,
@@ -103,3 +106,59 @@ def test_the_season_tables_have_their_schemas():
     assert games.schema.equals(GAME_SCHEMA)
     assert stints.num_rows == 4 and games.num_rows == 1
     assert "h6" in players.column("athlete_id").to_pylist()
+
+
+def _against_an_outside_team():
+    """
+    The visitors are from outside D1: their players turn up in a few games,
+    and one of them, a sub, has no id at all. Home subs h6 for h1 halfway.
+    """
+    return game(
+        *starters_act(),
+        made_2("home", "h1", clock=1180),
+        sub_out("away", "a1", clock=1170),
+        sub_in("away", "a9", clock=1170),
+        missed_2("away", "a9", clock=1160),
+        defensive_rebound("home", "h2", clock=1158),
+        sub_out("home", "h1", clock=1150),
+        sub_in("home", "h6", clock=1150),
+        made_2("home", "h6", clock=1140),
+        missed_2("away", "a2", clock=1130),
+    )
+
+
+_SEASON = {**{p: 30 for p in (*HOME, "h6")}, **{p: 3 for p in (*AWAY, "a9")}}
+
+
+def test_an_outside_team_plays_as_one_generic_side():
+    built = game_stints(_against_an_outside_team(), _SEASON)
+    assert built.report["generic_side"] == "away"
+    assert built.report["possessions_dropped"] == 0
+    # Their substitution doesn't start a stint; home's does.
+    assert [(r["stint"], r["offense_side"]) for r in built.rows] == [
+        (1, "home"),
+        (1, "away"),
+        (2, "home"),
+        (2, "away"),
+    ]
+    first_home, first_away = built.rows[0], built.rows[1]
+    assert first_home["offense_players"] == ["h1", "h2", "h3", "h4", "h5"]
+    assert first_home["defense_players"] == [GENERIC]
+    assert first_away["offense_players"] == [GENERIC]
+    assert built.rows[2]["offense_players"] == ["h2", "h3", "h4", "h5", "h6"]
+
+
+def test_with_a_generic_side_the_starters_are_the_other_sides():
+    # Away's starters don't come out at five (a1 never acts); home's do.
+    plays = [p for p in starters_act() if p.athlete_id != "a1"]
+    built = game_stints(
+        game(*plays, sub_in("home", "h6"), sub_out("home", "h6")), _SEASON
+    )
+    assert built.report["generic_side"] == "away"
+    assert built.report["starters_found"]
+
+
+def test_without_appearances_no_side_is_generic():
+    built = game_stints(_against_an_outside_team())
+    assert built.report["generic_side"] is None
+    assert built.rows[0]["defense_players"] == ["a1", "a2", "a3", "a4", "a5"]

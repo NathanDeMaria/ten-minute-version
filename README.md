@@ -47,6 +47,16 @@ gives one row per side that had the ball in it: that side's five
 Rows add: a lineup's season, or a player's on-floor possessions, is a
 group-by. See `ten_minute_version/stints.py` for the schemas.
 
+**Teams from outside Division I** play as one generic team: their side of a
+row is the single id `"generic"`, against the other side's five, and the game
+row's `generic_side` says which side that was. Most of their players have no
+ESPN id, so they can't be followed one by one; the ones who do turn up in
+only the few games their team plays against D1, which is how they're told
+apart from a D1 team with a player ESPN hasn't linked (`opponents.py`). In
+2025-26 that's 535 mens and 395 womens games, and it keeps 5,795 mens and
+5,478 womens possessions the table used to leave out, most of them in
+November and December.
+
 ## How a game becomes possessions
 
 | module | what it does |
@@ -57,6 +67,7 @@ group-by. See `ten_minute_version/stints.py` for the schemas.
 | `possessions` | the game cut into possessions, each credited to a floor |
 | `stints` | possessions grouped into the tables above |
 | `names` | ids for the plays that only name their player |
+| `opponents` | which side, if either, is a team from outside Division I |
 | `estimate`, `probabilities`, `evaluate` | lineups where the feed has no substitutions |
 
 - **Starters** aren't in the feed. A player whose first appearance is anything
@@ -77,20 +88,21 @@ group-by. See `ten_minute_version/stints.py` for the schemas.
 
 ## The checks
 
-What `build.py` prints, on the two windows built so far: season 2024
-(2024-25) from 2025-02-15 to the end, and season 2025 (2025-26) for January
-2026. Seasons are named for the year they start in, as in endgame.
+What `build.py` prints for the two seasons with substitutions: 2024 (2024-25,
+from 2025-02-15, when the feed started logging them) and 2025 (2025-26, all
+of it). Seasons are named for the year they start in, as in endgame.
 
 | | mens 2024 | mens 2025 | womens 2024 | womens 2025 |
 | --- | --- | --- | --- | --- |
-| games | 1,466 | 1,556 | 1,405 | 1,543 |
-| possessions five on five | 99.82% | 99.92% | 99.94% | 99.95% |
-| points counted = ESPN's final | 95.5% | 99.8% | 99.9% | 99.9% |
-| starters found | 99.2% | 99.0% | 98.5% | 99.0% |
-| repairs per game | 0.70 | 0.78 | 0.72 | 0.72 |
-| possessions per side per game | 67.8 | 68.3 | 70.0 | 71.0 |
+| games with substitutions | 1,482 | 6,270 | 1,415 | 6,010 |
+| possessions five on five (or against a generic team) | 99.82% | 99.91% | 99.94% | 99.85% |
+| games against a generic team | 0 | 535 | 0 | 395 |
+| points counted = ESPN's final | 95.2% | 99.7% | 99.9% | 99.8% |
+| starters found | 99.2% | 99.1% | 98.5% | 98.4% |
+| repairs per game | 0.74 | 0.88 | 0.75 | 0.90 |
+| possessions per side per game | 67.8 | 69.3 | 70.0 | 71.7 |
 
-The mens 2024 points miss is the feed's first four days: 65 of the 66 games
+The mens 2024 points miss is the feed's first four days: 70 of the 71 games
 that don't add up are 2025-02-15 to 02-18, where ESPN's score moves on baskets
 the play-by-play never logged. Possessions per side agree with the totals on
 ESPN's own matchup page -- median difference 0, within one on 77% of 5,554
