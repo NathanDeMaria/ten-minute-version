@@ -5,8 +5,9 @@ Build the possession tables for a season, and say how far to trust them.
 
 writes `{out}/league={league}/season={season}/{stints,games,players}.parquet`
 and prints the checks: how many games had substitutions, the share of
-possessions that came out five on five, how often the points counted match
-ESPN's final, and possessions per side per game.
+possessions that came out five on five (or five against a generic team from
+outside Division I), how often the points counted match ESPN's final, and
+possessions per side per game.
 
     uv run python build.py evaluate --league mens --season 2025 --train 2024
     uv run python build.py fit --league mens --seasons 2024,2025
@@ -33,14 +34,18 @@ from ten_minute_version.evaluate import (
     fit_on_floor,
     known_games,
 )
+from ten_minute_version.opponents import appearances
 from ten_minute_version.plays import read_games
 from ten_minute_version.probabilities import FEATURES, OnFloorModel
 from ten_minute_version.stints import season_tables
 
 
 def stints(league: str, season: int, root: str = "./plays", out: str = "./stints"):
+    # Read twice: once to count each player's games, which says which sides
+    # are teams from outside Division I, then to build.
+    seen = appearances(read_games(root, league, season))
     games = read_games(root, league, season)
-    stint_table, game_table, player_table = season_tables(games)
+    stint_table, game_table, player_table = season_tables(games, seen)
     directory = Path(out) / f"league={league}" / f"season={season}"
     directory.mkdir(parents=True, exist_ok=True)
     pq.write_table(stint_table, directory / "stints.parquet", compression="zstd")
@@ -60,6 +65,7 @@ def checks(stint_table: pa.Table, game_table: pa.Table) -> dict:
         == (game["home_final"], game["away_final"])
         for game in lined
     )
+    generic = [game for game in lined if game["generic_side"]]
     return {
         "games": len(games),
         "games_with_substitutions": len(lined),
@@ -67,6 +73,8 @@ def checks(stint_table: pa.Table, game_table: pa.Table) -> dict:
         "repairs_per_game": round(sum(g["repairs"] for g in lined) / n_lined, 2),
         "possessions_per_side_per_game": round(possessions / n_lined / 2, 1),
         "possessions_five_on_five": round(1 - dropped / max(possessions, 1), 4),
+        "games_with_a_generic_side": len(generic),
+        "possessions_in_them": sum(game["possessions"] for game in generic),
         "points_match_final": round(points_match / n_lined, 4),
         "stint_rows": stint_table.num_rows,
         "stint_rows_per_game": round(stint_table.num_rows / n_lined, 1),

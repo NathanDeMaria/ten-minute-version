@@ -55,6 +55,9 @@ class LineupReport:
     # Players put on or taken off the floor by a repair rule rather than a
     # logged substitution.
     repairs: int
+    # How many starters each side came out with, home first: for a game
+    # whose one side is left untracked, whether the other's were found.
+    starters: tuple[int, int]
 
 
 def on_floor(
@@ -118,6 +121,7 @@ class _Replay:
             }
             for side in SIDES
         }
+        starting = {side: set(on[side]) for side in SIDES}
         starters_found = all(len(on[side]) == 5 for side in SIDES)
         # A side is checked before the first play that isn't a substitution,
         # and again after every run of substitutions -- never in the middle
@@ -146,7 +150,8 @@ class _Replay:
                         if len(on[play.side]) > 5:
                             self._fix(on[play.side], play.side, i, keep={player})
             floors.append(_floor(on))
-        return floors, LineupReport(starters_found, self._repairs)
+        starters = (len(starting["home"]), len(starting["away"]))
+        return floors, LineupReport(starters_found, self._repairs, starters)
 
     def _next(self, side: str, player: str, i: int) -> tuple[int, How] | None:
         """A player's first appearance at or after play `i`."""

@@ -7,21 +7,28 @@ gives one row per side that had the ball in it: that side's five on offense
 against the other five on defense. Rows are additive -- a lineup's season
 is the sum of its rows -- so anything coarser is a group-by away.
 
-Possessions whose floor isn't five against five are left out of the table
-and counted in the game's report row instead, along with everything else
-that says how far to trust the game: whether it had substitutions at all,
-whether the starters came out at five, how many repairs the lineups needed,
-and whether the points counted match ESPN's final.
+A team from outside Division I plays as one generic team (`opponents`):
+its side of every row is the single id `GENERIC`, against the other side's
+five, so its games stay in the table even though its players can't be
+followed.
+
+Possessions whose floor isn't five against five (or five against the
+generic team) are left out of the table and counted in the game's report
+row instead, along with everything else that says how far to trust the
+game: whether it had substitutions at all, whether the starters came out at
+five, how many repairs the lineups needed, and whether the points counted
+match ESPN's final.
 """
 
 from dataclasses import dataclass
-from typing import Iterable
+from typing import Iterable, Mapping
 
 import pyarrow as pa
 
 from .events import Kind, classify
-from .lineups import on_floor
+from .lineups import SIDES, Floor, on_floor
 from .names import resolve_names
+from .opponents import GENERIC, generic_side
 from .plays import Game
 from .possessions import Possession, possessions
 
@@ -41,7 +48,8 @@ STINT_SCHEMA = pa.schema(
         pa.field("end_seconds", pa.int16(), nullable=False),
         # "home" or "away". Neutral sites aren't known here.
         pa.field("offense_side", pa.string(), nullable=False),
-        # Five ESPN athlete ids each, sorted.
+        # Five ESPN athlete ids each, sorted -- or just `GENERIC` ("generic")
+        # for a team from outside Division I (`opponents`).
         pa.field("offense_players", pa.list_(pa.string()), nullable=False),
         pa.field("defense_players", pa.list_(pa.string()), nullable=False),
         # The offense's lead when the stint started, from the points counted.
@@ -78,6 +86,9 @@ GAME_SCHEMA = pa.schema(
         # logging substitutions, and a few a week since. Such a game has no
         # lineups and no rows in the stint table.
         pa.field("has_substitutions", pa.bool_(), nullable=False),
+        # "home" or "away" for the side played as one generic team, if either.
+        pa.field("generic_side", pa.string()),
+        # The starters came out at five, on every side that's followed.
         pa.field("starters_found", pa.bool_(), nullable=False),
         pa.field("repairs", pa.int16(), nullable=False),
         pa.field("possessions", pa.int16(), nullable=False),
@@ -115,7 +126,12 @@ class GameStints:
     report: dict
 
 
-def game_stints(game: Game) -> GameStints:
+def game_stints(game: Game, appearances: Mapping[str, int] | None = None) -> GameStints:
+    """
+    A game's stint rows and its report row. `appearances` is how many of the
+    season's games each player appears in (`opponents.appearances`); without
+    it no side is played as generic.
+    """
     game = resolve_names(game)
     kinds = [classify(play) for play in game.plays]
     report = _report(game)
@@ -123,10 +139,13 @@ def game_stints(game: Game) -> GameStints:
         return GameStints([], report)
     floors, lineups = on_floor(game.plays, kinds)
     found, score = possessions(game, kinds, floors)
-    rows, dropped = _rows(game, found)
+    generic = generic_side(game, appearances) if appearances is not None else None
+    rows, dropped = _rows(game, found, generic)
+    starters = dict(zip(SIDES, lineups.starters))
     report.update(
         has_substitutions=True,
-        starters_found=lineups.starters_found,
+        generic_side=generic,
+        starters_found=all(starters[side] == 5 for side in SIDES if side != generic),
         repairs=lineups.repairs,
         possessions=len(found),
         possessions_dropped=dropped,
@@ -138,13 +157,18 @@ def game_stints(game: Game) -> GameStints:
     return GameStints(rows, report)
 
 
-def season_tables(games: Iterable[Game]) -> tuple[pa.Table, pa.Table, pa.Table]:
-    """The stint, game and player tables for a run of games."""
+def season_tables(
+    games: Iterable[Game], appearances: Mapping[str, int] | None = None
+) -> tuple[pa.Table, pa.Table, pa.Table]:
+    """
+    The stint, game and player tables for a run of games. `appearances` is
+    as for `game_stints`, counted over the same season.
+    """
     rows: list[dict] = []
     reports: list[dict] = []
     names: dict[tuple[str, int, str], str | None] = {}
     for game in games:
-        built = game_stints(game)
+        built = game_stints(game, appearances)
         rows += built.rows
         reports.append(built.report)
         for play in game.plays:
@@ -161,26 +185,32 @@ def season_tables(games: Iterable[Game]) -> tuple[pa.Table, pa.Table, pa.Table]:
     )
 
 
-def _rows(game: Game, found: list[Possession]) -> tuple[list[dict], int]:
+_GENERIC_SIDE = frozenset({GENERIC})
+
+
+def _rows(
+    game: Game, found: list[Possession], generic: str | None
+) -> tuple[list[dict], int]:
     rows: dict[tuple[int, str], dict] = {}
     stint = 0
     previous = None
     stint_start: Possession | None = None
     dropped = 0
     for possession in found:
-        home, away = possession.floor
-        if len(home) != 5 or len(away) != 5:
+        floor = _played(possession.floor, generic)
+        if any(len(side) != 5 and side != _GENERIC_SIDE for side in floor):
             dropped += 1
             previous = None
             continue
-        if possession.floor != previous:
+        # A generic side never changes, so a stint is the other side's five.
+        if floor != previous:
             stint += 1
-            previous = possession.floor
+            previous = floor
             stint_start = possession
         assert stint_start is not None
         key = (stint, possession.offense)
         if key not in rows:
-            rows[key] = _new_row(game, stint, possession, stint_start)
+            rows[key] = _new_row(game, stint, possession, stint_start, floor)
         _add(rows[key], possession)
     # A stint ends at its last possession, whichever side had it, so both of
     # its rows say the same.
@@ -192,8 +222,20 @@ def _rows(game: Game, found: list[Possession]) -> tuple[list[dict], int]:
     return list(rows.values()), dropped
 
 
-def _new_row(game: Game, stint: int, possession: Possession, start: Possession) -> dict:
-    home, away = possession.floor
+def _played(floor: Floor, generic: str | None) -> Floor:
+    """The floor as the table has it: a generic side as `GENERIC` alone."""
+    home, away = floor
+    if generic == "home":
+        return _GENERIC_SIDE, away
+    if generic == "away":
+        return home, _GENERIC_SIDE
+    return floor
+
+
+def _new_row(
+    game: Game, stint: int, possession: Possession, start: Possession, floor: Floor
+) -> dict:
+    home, away = floor
     offense, defense = (home, away) if possession.offense == "home" else (away, home)
     margin = start.start_margin
     if start.offense != possession.offense:
@@ -244,6 +286,7 @@ def _report(game: Game) -> dict:
         "date": game.date,
         "game_id": game.game_id,
         "has_substitutions": False,
+        "generic_side": None,
         "starters_found": False,
         "repairs": 0,
         "possessions": 0,
