@@ -1,0 +1,32 @@
+{
+  "league": "mens",
+  "with_box_scores": true,
+  "features": [
+    "intercept",
+    "in_estimate",
+    "in_nearest_action",
+    "log_seconds_since_action",
+    "log_seconds_to_action",
+    "no_action_since",
+    "no_action_to_come",
+    "minutes_share",
+    "foul_trouble"
+  ],
+  "coefficients": {
+    "intercept": 1.9446286810812654,
+    "in_estimate": 1.304990035718722,
+    "in_nearest_action": 1.262367576329792,
+    "log_seconds_since_action": -0.2522111399699707,
+    "log_seconds_to_action": -0.5817074104384038,
+    "no_action_since": -1.413270182799306,
+    "no_action_to_come": -3.3053302034248206,
+    "minutes_share": 1.9493638653780454,
+    "foul_trouble": -0.9922979969401469
+  },
+  "seasons": [
+    2024,
+    2025
+  ],
+  "games": 2417,
+  "old_feed": false
+}

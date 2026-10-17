@@ -41,6 +41,10 @@ class Kind(Enum):
     BLOCK = auto()
     FOUL = auto()
     TECHNICAL = auto()
+    TIMEOUT = auto()
+    # The media timeouts, at the first dead ball under each four-minute mark.
+    # Where teams make the most substitutions at once.
+    TV_TIMEOUT = auto()
     SUB_IN = auto()
     SUB_OUT = auto()
     PERIOD_END = auto()
@@ -86,6 +90,10 @@ def classify(play: Play) -> Kind:
         return Kind.TECHNICAL if play.play_type == "Technical Foul" else Kind.FOUL
     if category == "1015":
         return _substitution(play)
+    if category == "1008":
+        return (
+            Kind.TV_TIMEOUT if play.play_type == "OfficialTVTimeOut" else Kind.TIMEOUT
+        )
     if category is None:
         return _uncoded(play)
     return Kind.OTHER

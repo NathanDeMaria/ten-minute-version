@@ -34,4 +34,19 @@ stints:
 	uv run python build.py stints $(ARGS)
 
 
-.PHONY: lint check test plays stints
+# How good the estimated lineups are, on games whose real ones are known:
+#   make evaluate ARGS="--league mens --season 2025 --train 2024"
+# `--train` fits the probabilities on another season first, for an honest
+# score; `--old_feed` strips ids the way the feed before 2022-23 lacks them.
+evaluate:
+	uv run python build.py evaluate $(ARGS)
+
+
+# Refit the on-floor probabilities that ship in ten_minute_version/releases,
+# on every season with known lineups: commit what this changes.
+#   make fit ARGS="--league mens --seasons 2024,2025"
+fit:
+	uv run python build.py fit $(ARGS)
+
+
+.PHONY: lint check test plays stints evaluate fit

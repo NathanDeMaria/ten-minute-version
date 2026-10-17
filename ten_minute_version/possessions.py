@@ -49,6 +49,9 @@ class Possession:
     # The offense's lead when the possession started.
     start_margin: int
     floor: Floor
+    # The play whose floor `floor` is: the possession's last, or the foul a
+    # final free throw came from.
+    credit_play: int = 0
     points: int = 0
     fga2: int = 0
     fgm2: int = 0
@@ -123,15 +126,16 @@ def possessions(
     # side holding technical free throws -- both forgotten at the next play
     # that isn't a free throw.
     foul_floor: Floor | None = None
+    foul_play = 0
     technical_side: str | None = None
 
-    for play, kind, floor in zip(game.plays, kinds, floors):
+    for i, (play, kind, floor) in enumerate(zip(game.plays, kinds, floors)):
         if kind == Kind.PERIOD_END:
             _finish(current, found)
             current = None
             continue
         if kind in (Kind.FOUL, Kind.TECHNICAL):
-            foul_floor = floor
+            foul_floor, foul_play = floor, i
             if kind == Kind.TECHNICAL and play.side is not None:
                 technical_side = other(play.side)
             elif (
@@ -169,7 +173,10 @@ def possessions(
         current.count(kind)
         score.points[side] += POINTS.get(kind, 0)
         current.end_seconds = seconds
-        current.floor = foul_floor if kind in FREE_THROWS and foul_floor else floor
+        if kind in FREE_THROWS and foul_floor:
+            current.floor, current.credit_play = foul_floor, foul_play
+        else:
+            current.floor, current.credit_play = floor, i
     _finish(current, found)
     return found, score
 

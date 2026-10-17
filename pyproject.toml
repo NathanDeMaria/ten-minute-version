@@ -9,6 +9,9 @@ dependencies = [
     # as parquet, so arrow is the package's whole interface rather than an
     # optional reader the way it is in the-lucky-ones.
     "pyarrow>=21.0.0",
+    # The on-floor probabilities: a logistic regression small enough to fit
+    # with Newton steps, so numpy rather than a solver.
+    "numpy>=2.3.0",
 ]
 
 [dependency-groups]
