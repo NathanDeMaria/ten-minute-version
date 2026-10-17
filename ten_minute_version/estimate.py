@@ -280,7 +280,9 @@ class _Side:
             while len(five) > 5:
                 # More than five left over from a window where six acted
                 # (a substitution the dead balls didn't catch)
-                spare = [p for p in five if p not in required] or list(five)
+                # Sorted, here and below, so ties go the same way every run
+                # rather than by the set's order, which follows the hash seed.
+                spare = [p for p in sorted(five) if p not in required] or sorted(five)
                 five.discard(
                     max(spare, key=partial(self._leave_order, arrival=None, w=w))
                 )
@@ -288,7 +290,7 @@ class _Side:
                 if len(five) < 5:
                     five.add(arrival)
                     continue
-                candidates = [p for p in five if p not in required]
+                candidates = [p for p in sorted(five) if p not in required]
                 if not candidates:
                     five.add(arrival)
                     continue

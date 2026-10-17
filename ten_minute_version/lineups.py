@@ -163,13 +163,15 @@ class _Replay:
 
     def _fix(self, on: set[str], side: str, i: int, keep: set[str]) -> None:
         if len(on) > 5:
-
-            def drop_order(player: str) -> tuple[int, int]:
+            # The player id last, so a tie goes the same way on every run
+            # rather than by the set's order, which changes with the hash
+            # seed.
+            def drop_order(player: str) -> tuple[int, int, str]:
                 upcoming = self._next(side, player, i)
                 if upcoming is None:
-                    return (1, 0)
+                    return (1, 0, player)
                 index, how = upcoming
-                return (0, 0) if how == "in" else (2, -index)
+                return (0, 0, player) if how == "in" else (2, -index, player)
 
             for player in sorted(on - keep, key=drop_order)[: len(on) - 5]:
                 on.discard(player)
