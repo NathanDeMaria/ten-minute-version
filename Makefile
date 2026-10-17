@@ -18,4 +18,20 @@ test:
 	uv run pytest .
 
 
-.PHONY: lint check test
+# A local copy of endgame's processed NCAABB play-by-play, which is what
+# `stints` reads by default. BUCKET comes from the same config endgame's
+# stores read.
+BUCKET ?= $(shell jq -r .bucket.value $(HOME)/.aws-batch/config.json)
+plays:
+	aws s3 sync s3://${BUCKET}/processed/basketball_plays ./plays
+
+
+# One season's possession tables, and the checks that say how far to trust
+# them: `make stints ARGS="--league mens --season 2025"`. Writes under
+# ./stints; `--root` and `--out` move either end.
+ARGS ?=
+stints:
+	uv run python build.py stints $(ARGS)
+
+
+.PHONY: lint check test plays stints
