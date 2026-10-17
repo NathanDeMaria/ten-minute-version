@@ -23,7 +23,9 @@ from .testing import play
         ("1015", "Substitution", "X subbing out for Purdue", Kind.SUB_OUT),
         ("1018", "End Period", "End of 1st half", Kind.PERIOD_END),
         ("1020", "End Period", "End of 1st Overtime", Kind.PERIOD_END),
-        ("1008", "OfficialTVTimeOut", "Official TV Timeout", Kind.OTHER),
+        ("1008", "OfficialTVTimeOut", "Official TV Timeout", Kind.TV_TIMEOUT),
+        ("1008", "ShortTimeOut", "Purdue Timeout", Kind.TIMEOUT),
+        ("1011", "Coach's Challenge (Stands)", "", Kind.OTHER),
     ],
 )
 def test_a_coded_play_is_read_from_its_category(category, play_type, text, kind):

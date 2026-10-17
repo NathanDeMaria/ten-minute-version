@@ -1,0 +1,32 @@
+{
+  "league": "womens",
+  "with_box_scores": false,
+  "features": [
+    "intercept",
+    "in_estimate",
+    "in_nearest_action",
+    "log_seconds_since_action",
+    "log_seconds_to_action",
+    "no_action_since",
+    "no_action_to_come",
+    "minutes_share",
+    "foul_trouble"
+  ],
+  "coefficients": {
+    "intercept": 4.208534400555418,
+    "in_estimate": 1.3503467808966618,
+    "in_nearest_action": 1.1673263008402797,
+    "log_seconds_since_action": -0.3285493884988692,
+    "log_seconds_to_action": -0.7290571161819162,
+    "no_action_since": -2.2131075525432093,
+    "no_action_to_come": -4.338701719593707,
+    "minutes_share": 0.0,
+    "foul_trouble": -0.9909258870525254
+  },
+  "seasons": [
+    2024,
+    2025
+  ],
+  "games": 2384,
+  "old_feed": false
+}

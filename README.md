@@ -56,6 +56,8 @@ group-by. See `ten_minute_version/stints.py` for the schemas.
 | `lineups` | who was on the floor at every play |
 | `possessions` | the game cut into possessions, each credited to a floor |
 | `stints` | possessions grouped into the tables above |
+| `names` | ids for the plays that only name their player |
+| `estimate`, `probabilities`, `evaluate` | lineups where the feed has no substitutions |
 
 - **Starters** aren't in the feed. A player whose first appearance is anything
   but subbing in started. Substitutions -- including the ones at the start of
@@ -93,5 +95,36 @@ that don't add up are 2025-02-15 to 02-18, where ESPN's score moves on baskets
 the play-by-play never logged. Possessions per side agree with the totals on
 ESPN's own matchup page -- median difference 0, within one on 77% of 5,554
 mens team-games since 2025-02-19 -- which are themselves an estimate.
+
+## Before the substitutions: estimated lineups
+
+Every game before 2025-02-15 has players' actions but no substitutions, so its
+lineups are estimated (`estimate`) and turned into chances of being on the
+floor (`probabilities`), scored by hiding the substitutions of games whose
+lineups are known (`evaluate`, `make evaluate`):
+
+- **names first**: before 2022-23 shots, free throws, steals and assists carry
+  no player id, only a name; `names` recovers ~88% of them from the ids the
+  same players carry on rebounds and fouls, which restores the old feed to
+  today's density;
+- **a persistent lineup**: the five only changes when someone off it acts.
+  The leaver is whoever's next action is furthest off, foul trouble first;
+  the swap is backdated a third of the way to the leaver's last action and
+  snapped to a TV timeout; the starters come back at halftime;
+- **probabilities** from a logistic regression on what the estimate saw,
+  fitted on known games and scaled to five a side (`releases/`).
+
+On January 2026, with the probabilities fitted on February-April 2025:
+
+| | mens | womens | mens, old feed |
+| --- | --- | --- | --- |
+| nearest action: players right / all five | 85.5% / 40.2% | 85.0% / 38.6% | 85.1% / 39.1% |
+| estimate | 86.0% / 43.9% | 85.7% / 42.2% | 85.7% / 42.9% |
+| estimate with box-score starters and minutes | 86.8% / 47.3% | 86.5% / 45.9% | 86.5% / 46.4% |
+| brier: probabilities / hard estimate | 0.102 / 0.149 | 0.104 / 0.150 | 0.105 / 0.153 |
+
+All five right less than half the time is why a rating should take the
+probabilities, which are calibrated (a 0.43 chance is on the floor 41% of the
+time, 0.70 is 68%), rather than the hard guesses.
 
 [endgame]: https://github.com/NathanDeMaria/EndGame
