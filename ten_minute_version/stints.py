@@ -21,6 +21,7 @@ import pyarrow as pa
 
 from .events import Kind, classify
 from .lineups import on_floor
+from .names import resolve_names
 from .plays import Game
 from .possessions import Possession, possessions
 
@@ -115,6 +116,7 @@ class GameStints:
 
 
 def game_stints(game: Game) -> GameStints:
+    game = resolve_names(game)
     kinds = [classify(play) for play in game.plays]
     report = _report(game)
     if not any(kind in (Kind.SUB_IN, Kind.SUB_OUT) for kind in kinds):
