@@ -5,15 +5,16 @@ Player ratings for college basketball, from who was on the floor.
 The name is the ten: every possession is five players against five, and the
 point of this package is to split what happened on it between them.
 
-The first step, and all that's here so far, is the possession table: each game
-broken into lineup-vs-lineup stints, and each side's possessions in a stint
-counted by how they ended.
+First the possession table: each game broken into lineup-vs-lineup stints,
+and each side's possessions in a stint counted by how they ended. Then the
+ratings fitted to it (see [Ratings](#ratings)).
 
 ```bash
 make plays                                         # endgame's processed plays, locally
 make summaries                                     # endgame's game summaries, every season
 make stints ARGS="--league mens --season 2025"     # -> ./stints/league=mens/season=2025/
 make context ARGS="--league mens --season 2025"    # who played and where, next to them
+make ratings ARGS="--league mens --season 2025"    # score the models, write ratings.parquet
 ```
 
 `make seasons` builds the stint tables and context for every league and season
@@ -88,6 +89,8 @@ to the players: whether they turn up in only a few of the season's games.
 | `opponents` | which side, if either, is a team from outside Division I |
 | `context` | who played each game and where, from the game summaries endgame stores |
 | `estimate`, `probabilities`, `evaluate` | lineups where the feed has no substitutions |
+| `shot_model` | the chance a shot goes in, from where and how it was taken and who took it |
+| `ratings` | player ratings fitted to the stint table, and how they're scored |
 
 - **Starters** aren't in the feed. A player whose first appearance is anything
   but subbing in started. Substitutions -- including the ones at the start of
@@ -126,6 +129,49 @@ that don't add up are 2025-02-15 to 02-18, where ESPN's score moves on baskets
 the play-by-play never logged. Possessions per side agree with the totals on
 ESPN's own matchup page -- median difference 0, within one on 77% of 5,554
 mens team-games since 2025-02-19 -- which are themselves an estimate.
+
+## Ratings
+
+`build.py ratings` fits regularised adjusted plus-minus: each stint row's
+points per possession as a baseline, a home edge, the offense's five ratings
+and minus the defense's five, by ridge regression weighted by possessions.
+Defense ratings are points kept off the board, and everything is per 100
+possessions. The home edge applies at both ends and not at a neutral site
+(`context`). A generic team is one more player.
+
+**What they're judged on**: predicting games they weren't fitted to. Five folds
+of games are held out in turn; each held-out game is predicted from ratings
+fitted on the rest, with its real lineups and possessions, and the error in its
+home margin is what counts. Two baselines get the same treatment: the baseline
+and home edge alone, and a team model (each team's offense and defense, and
+nothing about who's on the floor). The t statistic compares each with the best
+players model on the same games.
+
+**The target** is what the ratings are fitted to; every model is scored on real
+points. `shot_model` is the-archer's shot model (a cubic in distance for jump
+shots, league rates for layups, dunks, tips and free throws) plus each
+shooter's own skill, shrunk by how many shots he took. Expected points for
+every shot turn out to throw away real signal: a layup gets one league chance,
+so finishing and rim protection go with it. Threes and free throws are where
+the defense has least say:
+
+| 2025-26 margin RMSE (t vs best) | mens | womens |
+| --- | --- | --- |
+| baseline and home edge | 17.89 (28.9) | 21.66 (33.5) |
+| teams | 12.78 (3.2) | 13.88 (3.7) |
+| players, points | 12.47 (2.1) | 13.35 (0.5) |
+| players, 3s and FTs half actual, half expected | **12.41** | **13.33** |
+| players, 3s expected | 12.64 (8.7) | 13.55 (8.4) |
+| players, 3s and FTs expected | 12.70 (9.9) | 13.61 (9.4) |
+| players, every shot expected (shooter's skill) | 14.54 (19.4) | 15.90 (20.2) |
+| players, every shot expected (league chance) | 14.90 (21.3) | 17.00 (25.0) |
+
+Players beat teams in both leagues, so who's on the floor carries what a
+team's season doesn't. Taking half the luck out of threes and free throws is
+the best target in both, though only just beyond points as they happened. The
+best penalty is 300 possessions in both leagues, and the home edge comes to
+3.0 points a game for mens, 2.7 for womens. `ratings.parquet` is the best
+target and penalty fitted on every game.
 
 ## Before the substitutions: estimated lineups
 
