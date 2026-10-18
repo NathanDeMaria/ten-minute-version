@@ -21,7 +21,7 @@ match ESPN's final.
 """
 
 from dataclasses import dataclass
-from typing import Iterable, Mapping
+from typing import Iterable, Mapping, NamedTuple
 
 import pyarrow as pa
 
@@ -30,7 +30,7 @@ from .lineups import SIDES, Floor, on_floor
 from .names import resolve_names
 from .opponents import GENERIC, generic_side
 from .plays import Game
-from .possessions import Possession, possessions
+from .possessions import Possession, Shot, possessions
 
 STINT_SCHEMA = pa.schema(
     [
@@ -116,6 +116,27 @@ PLAYER_SCHEMA = pa.schema(
     ]
 )
 
+# Every field goal and free throw in the stint table's possessions, for
+# expected points: (game_id, stint, offense_side) joins a shot to its row.
+SHOT_SCHEMA = pa.schema(
+    [
+        pa.field("league", pa.string(), nullable=False),
+        pa.field("season", pa.int16(), nullable=False),
+        pa.field("game_id", pa.string(), nullable=False),
+        pa.field("stint", pa.int16(), nullable=False),
+        pa.field("offense_side", pa.string(), nullable=False),
+        pa.field("shooter", pa.string()),
+        # 2, 3, or 1 for a free throw
+        pa.field("value", pa.int8(), nullable=False),
+        pa.field("made", pa.bool_(), nullable=False),
+        # JumpShot, LayUpShot, DunkShot, TipShot; a free throw's own type
+        pa.field("shot_type", pa.string()),
+        # Feet: x across the court, the hoop at 25; y out from the baseline.
+        pa.field("x", pa.float32()),
+        pa.field("y", pa.float32()),
+    ]
+)
+
 _ENDINGS = ("fg2", "fg3", "ft", "turnover", "miss", "other")
 _COUNTS = ("fga2", "fgm2", "fga3", "fgm3", "fta", "ftm", "oreb", "tov")
 
@@ -124,6 +145,14 @@ _COUNTS = ("fga2", "fgm2", "fga3", "fgm3", "fta", "ftm", "oreb", "tov")
 class GameStints:
     rows: list[dict]
     report: dict
+    shots: list[dict]
+
+
+class SeasonTables(NamedTuple):
+    stints: pa.Table
+    games: pa.Table
+    players: pa.Table
+    shots: pa.Table
 
 
 def game_stints(game: Game, appearances: Mapping[str, int] | None = None) -> GameStints:
@@ -136,11 +165,11 @@ def game_stints(game: Game, appearances: Mapping[str, int] | None = None) -> Gam
     kinds = [classify(play) for play in game.plays]
     report = _report(game)
     if not any(kind in (Kind.SUB_IN, Kind.SUB_OUT) for kind in kinds):
-        return GameStints([], report)
+        return GameStints([], report, [])
     floors, lineups = on_floor(game.plays, kinds)
     found, score = possessions(game, kinds, floors)
     generic = generic_side(game, appearances) if appearances is not None else None
-    rows, dropped = _rows(game, found, generic)
+    rows, dropped, shots = _rows(game, found, generic)
     starters = dict(zip(SIDES, lineups.starters))
     report.update(
         has_substitutions=True,
@@ -154,23 +183,25 @@ def game_stints(game: Game, appearances: Mapping[str, int] | None = None) -> Gam
         home_technical_points=score.technical_points["home"],
         away_technical_points=score.technical_points["away"],
     )
-    return GameStints(rows, report)
+    return GameStints(rows, report, shots)
 
 
 def season_tables(
     games: Iterable[Game], appearances: Mapping[str, int] | None = None
-) -> tuple[pa.Table, pa.Table, pa.Table]:
+) -> SeasonTables:
     """
-    The stint, game and player tables for a run of games. `appearances` is
-    as for `game_stints`, counted over the same season.
+    The stint, game, player and shot tables for a run of games.
+    `appearances` is as for `game_stints`, counted over the same season.
     """
     rows: list[dict] = []
     reports: list[dict] = []
+    shots: list[dict] = []
     names: dict[tuple[str, int, str], str | None] = {}
     for game in games:
         built = game_stints(game, appearances)
         rows += built.rows
         reports.append(built.report)
+        shots += built.shots
         for play in game.plays:
             if play.athlete_id:
                 names[(game.league, game.season, play.athlete_id)] = play.athlete_name
@@ -178,10 +209,11 @@ def season_tables(
         {"league": league, "season": season, "athlete_id": athlete, "athlete_name": n}
         for (league, season, athlete), n in sorted(names.items())
     ]
-    return (
+    return SeasonTables(
         pa.Table.from_pylist(rows, schema=STINT_SCHEMA),
         pa.Table.from_pylist(reports, schema=GAME_SCHEMA),
         pa.Table.from_pylist(players, schema=PLAYER_SCHEMA),
+        pa.Table.from_pylist(shots, schema=SHOT_SCHEMA),
     )
 
 
@@ -190,8 +222,9 @@ _GENERIC_SIDE = frozenset({GENERIC})
 
 def _rows(
     game: Game, found: list[Possession], generic: str | None
-) -> tuple[list[dict], int]:
+) -> tuple[list[dict], int, list[dict]]:
     rows: dict[tuple[int, str], dict] = {}
+    shots: list[dict] = []
     stint = 0
     previous = None
     stint_start: Possession | None = None
@@ -212,6 +245,10 @@ def _rows(
         if key not in rows:
             rows[key] = _new_row(game, stint, possession, stint_start, floor)
         _add(rows[key], possession)
+        shots += [
+            _shot_row(game, stint, possession.offense, shot)
+            for shot in possession.shots
+        ]
     # A stint ends at its last possession, whichever side had it, so both of
     # its rows say the same.
     ends: dict[int, int] = {}
@@ -219,7 +256,23 @@ def _rows(
         ends[stint] = max(ends.get(stint, 0), row["end_seconds"])
     for (stint, _), row in rows.items():
         row["end_seconds"] = ends[stint]
-    return list(rows.values()), dropped
+    return list(rows.values()), dropped, shots
+
+
+def _shot_row(game: Game, stint: int, offense: str, shot: Shot) -> dict:
+    return {
+        "league": game.league,
+        "season": game.season,
+        "game_id": game.game_id,
+        "stint": stint,
+        "offense_side": offense,
+        "shooter": shot.shooter,
+        "value": shot.value,
+        "made": shot.made,
+        "shot_type": shot.shot_type,
+        "x": shot.x,
+        "y": shot.y,
+    }
 
 
 def _played(floor: Floor, generic: str | None) -> Floor:

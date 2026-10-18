@@ -1,5 +1,5 @@
 from .opponents import GENERIC
-from .stints import GAME_SCHEMA, STINT_SCHEMA, game_stints, season_tables
+from .stints import GAME_SCHEMA, SHOT_SCHEMA, STINT_SCHEMA, game_stints, season_tables
 from .testing import (
     AWAY,
     HOME,
@@ -101,11 +101,26 @@ def test_a_game_without_substitutions_has_no_rows():
 
 
 def test_the_season_tables_have_their_schemas():
-    stints, games, players = season_tables([_two_stints()])
+    stints, games, players, shots = season_tables([_two_stints()])
     assert stints.schema.equals(STINT_SCHEMA)
     assert games.schema.equals(GAME_SCHEMA)
+    assert shots.schema.equals(SHOT_SCHEMA)
     assert stints.num_rows == 4 and games.num_rows == 1
     assert "h6" in players.column("athlete_id").to_pylist()
+
+
+def test_every_shot_in_a_row_is_in_the_shot_table_under_its_stint():
+    built = game_stints(_two_stints())
+    by_row: dict[tuple[int, str], list[dict]] = {}
+    for shot in built.shots:
+        by_row.setdefault((shot["stint"], shot["offense_side"]), []).append(shot)
+    for row in built.rows:
+        shots = by_row.get((row["stint"], row["offense_side"]), [])
+        field_goals = [s for s in shots if s["value"] > 1]
+        assert len(field_goals) == row["fga2"] + row["fga3"]
+        assert sum(s["value"] for s in shots if s["made"]) == row["points"]
+    first = built.shots[0]
+    assert (first["shooter"], first["value"], first["made"]) == ("h1", 2, True)
 
 
 def _against_an_outside_team():

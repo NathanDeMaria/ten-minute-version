@@ -26,7 +26,9 @@ def _write_day(root, league, season, day, rows):
                 "participant_ids": ["p1"],
                 "home_score": 2 * number,
                 "away_score": 0,
-                "shot_x": 19,
+                "shot_x": 19.0,
+                "shot_y": 12.0,
+                "scoring_play": True,
             }
             for game_id, number in rows
         ]
@@ -47,6 +49,7 @@ def test_games_come_back_in_date_order_with_their_plays_in_order(tmp_path):
     assert [p.text for p in g2.plays] == ["play 1", "play 2"]
     assert g2.plays[0].participant_ids == ("p1",)
     assert g2.plays[0].clock_seconds == 1199
+    assert (g2.plays[0].x, g2.plays[0].y) == (19.0, 12.0)
 
 
 def test_a_season_with_nothing_processed_has_no_games(tmp_path):

@@ -33,6 +33,8 @@ _COLUMNS = [
     "participant_ids",
     "home_score",
     "away_score",
+    "shot_x",
+    "shot_y",
 ]
 
 
@@ -60,6 +62,11 @@ class Play:
     # stale often enough that points are counted from the scoring plays.
     home_score: int | None
     away_score: int | None
+    # Where a shot was taken from, in feet: x across the court (0 to 50, the
+    # hoop at 25) and y out from the shooting team's baseline. None for
+    # anything but a shot, and for the odd shot ESPN didn't place.
+    x: float | None = None
+    y: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,4 +122,6 @@ def _play(row: dict) -> Play:
         participant_ids=tuple(row["participant_ids"] or ()),
         home_score=row["home_score"],
         away_score=row["away_score"],
+        x=row["shot_x"],
+        y=row["shot_y"],
     )
