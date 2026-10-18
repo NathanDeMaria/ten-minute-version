@@ -173,6 +173,12 @@ def test_with_a_generic_side_the_starters_are_the_other_sides():
     assert built.report["starters_found"]
 
 
+def test_a_game_without_substitutions_still_says_its_generic_side():
+    built = game_stints(game(*starters_act(), made_2("home", "h1")), _SEASON)
+    assert built.rows == [] and not built.report["has_substitutions"]
+    assert built.report["generic_side"] == "away"
+
+
 def test_without_appearances_no_side_is_generic():
     built = game_stints(_against_an_outside_team())
     assert built.report["generic_side"] is None

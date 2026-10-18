@@ -11,7 +11,7 @@ counted by how they ended.
 
 ```bash
 make plays                                         # endgame's processed plays, locally
-make summaries                                     # endgame's game summaries, 2024 and 2025
+make summaries                                     # endgame's game summaries, every season
 make stints ARGS="--league mens --season 2025"     # -> ./stints/league=mens/season=2025/
 make context ARGS="--league mens --season 2025"    # who played and where, next to them
 ```

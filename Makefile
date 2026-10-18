@@ -27,13 +27,10 @@ plays:
 
 
 # A local copy of the game summaries endgame stores, which say who played
-# each game and where (`build.py context`). ~170 MB a league-season.
-LEAGUES ?= mens womens
-SEASONS ?= 2024 2025
+# each game and where (`build.py context`): every season it has, 2010-11 on,
+# ~3 GB.
 summaries:
-	for league in $(LEAGUES); do for season in $(SEASONS); do \
-		aws s3 sync --only-show-errors s3://${BUCKET}/summaries/ncaabb/$$league/$$season ./summaries/$$league/$$season; \
-	done; done
+	aws s3 sync --only-show-errors s3://${BUCKET}/summaries/ncaabb ./summaries
 
 
 # One season's possession tables, and the checks that say how far to trust

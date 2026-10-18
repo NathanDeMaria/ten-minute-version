@@ -61,7 +61,8 @@ def context(
     Write who played each game and where (`context.parquet`) next to the
     season's stint tables, and check it against them: how many of the games
     it covers, and whether the side played as generic is the one ESPN says
-    isn't in Division I.
+    isn't in Division I. A season with summaries but no plays (before
+    2013-14) gets the table and no check.
     """
     contexts = read_context(summaries, league, season)
     directory = Path(out) / f"league={league}" / f"season={season}"
@@ -69,10 +70,10 @@ def context(
     pq.write_table(
         context_table(contexts), directory / "context.parquet", compression="zstd"
     )
-    games = pq.read_table(directory / "games.parquet").to_pylist()
-    lined = [game for game in games if game["has_substitutions"]]
+    stinted = directory / "games.parquet"
+    games = pq.read_table(stinted).to_pylist() if stinted.exists() else []
     agreement: dict[str, int] = {}
-    for game in lined:
+    for game in games:
         found = contexts.get(game["game_id"])
         if found is None:
             continue
@@ -92,6 +93,7 @@ def context(
     print(
         json.dumps(
             {
+                "summaries": len(contexts),
                 "games": len(games),
                 "with_a_summary": sum(game["game_id"] in contexts for game in games),
                 "neutral_site": sum(c.neutral_site for c in contexts.values()),
