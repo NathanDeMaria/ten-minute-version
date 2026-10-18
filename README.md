@@ -15,6 +15,9 @@ make summaries                                     # endgame's game summaries, e
 make stints ARGS="--league mens --season 2025"     # -> ./stints/league=mens/season=2025/
 make context ARGS="--league mens --season 2025"    # who played and where, next to them
 make ratings ARGS="--league mens --season 2025"    # score the models, write ratings.parquet
+make estimated ARGS="--league mens --season 2024"  # possessions for games with no substitutions
+make priors ARGS="--league mens --season 2025"     # what to shrink players toward
+make carryover ARGS="--league mens --season 2025"  # last season's ratings on this season's games
 ```
 
 `make seasons` builds the stint tables and context for every league and season
@@ -91,6 +94,9 @@ to the players: whether they turn up in only a few of the season's games.
 | `estimate`, `probabilities`, `evaluate` | lineups where the feed has no substitutions |
 | `shot_model` | the chance a shot goes in, from where and how it was taken and who took it |
 | `ratings` | player ratings fitted to the stint table, and how they're scored |
+| `box_scores`, `priors` | box-score lines from the summaries, and what to shrink ratings toward |
+| `estimated` | possession rows for games with no substitutions, from estimated lineups |
+| `carryover` | last season's ratings scored on this season's early games |
 
 - **Starters** aren't in the feed. A player whose first appearance is anything
   but subbing in started. Substitutions -- including the ones at the start of
@@ -171,7 +177,47 @@ team's season doesn't. Taking half the luck out of threes and free throws is
 the best target in both, though only just beyond points as they happened. The
 best penalty is 300 possessions in both leagues, and the home edge comes to
 3.0 points a game for mens, 2.7 for womens. `ratings.parquet` is the best
-target and penalty fitted on every game.
+target fitted on every game with the team columns `priors` found best
+(player penalty 1,000, team penalty 30): `offense` and `defense` there are a
+player's rating against his team's plus a fifth of his team's, so a lineup's
+five add up to what the fit predicts; `offense_vs_team` and
+`defense_vs_team` are the first part alone.
+
+## Priors
+
+A ridge fit pulls every player toward zero by how little he played; a prior
+says where to pull him instead (`priors`, `make priors`). On the same held-out
+games:
+
+| 2025-26 margin RMSE (t vs no prior) | mens | womens |
+| --- | --- | --- |
+| no prior | 12.409 | 13.332 |
+| box score (a statistical plus-minus from per-40 rates) | 12.408 (-0.1) | 13.293 (-2.8) |
+| last season, its real lineups only | 12.410 (0.3) | 13.312 (-3.4) |
+| last season, with its estimated possessions | 12.390 (-2.5) | 13.253 (-7.7) |
+| **team**: team columns alongside the players | **12.007 (-8.0)** | **12.843 (-8.7)** |
+| team + last season with its estimated possessions | 11.997 (-8.5) | 12.809 (-9.9) |
+| team + box score | 12.022 (-7.8) | 12.867 (-8.3) |
+
+Pulling a player toward his team is by far the best prior: it's what a team
+model knows and the players model doesn't, and the two together beat either.
+The others add little on top, within a season: the games they'd say something
+about are already in the fit.
+
+**Looking forward, players add less.** Random folds let a held-out game lean
+on the games around it. Fitting on everything before 2025-02-15 (2026-02-15)
+and predicting the games after:
+
+| margin RMSE | 2024-25, estimated lineups before, real after | 2025-26, real lineups throughout |
+| --- | --- | --- |
+| teams | 10.781 | 11.039 |
+| players | 11.015 | 11.225 |
+| players + teams | 10.766 | 11.031 |
+
+(mens, the best target and penalties for each.) Within a season, a team's own
+results already say most of what its players will. And estimated lineups do
+as well here as real ones: the gap between players + teams and teams is the
+same size.
 
 ## Before the substitutions: estimated lineups
 
@@ -204,4 +250,38 @@ All five right less than half the time is why a rating should take the
 probabilities, which are calibrated (a 0.43 chance is on the floor 41% of the
 time, 0.70 is 68%), rather than the hard guesses.
 
+`build.py estimated` does that for a season's games without substitutions
+(`estimated`): each game's floors are estimated with its own box score's
+starters and minutes, and every possession becomes a row crediting each
+player by his chance of being on the floor at its credit play -- weights that
+add up to five a side, scaled down where more than five acted between dead
+balls. 2024-25 gets 641,057 mens possessions in 4,634 games and 621,932
+womens in 4,347, which the ratings read alongside its stint rows.
+
 [endgame]: https://github.com/NathanDeMaria/EndGame
+
+## Across seasons: what the estimated lineups are worth
+
+Where player ratings should earn their keep is the next season, when a team's
+minutes have turned over and its rating carries over badly
+(`carryover`, `make carryover`). Each 2025-26 game from 2025-11-17 to
+12-31 is predicted with its real lineups from 2024-25's ratings: each player
+on the floor at his rating from last season, a player it didn't rate
+counted as a newcomer. How much of each term to use is fitted on 2025-11-03
+to 11-16.
+
+| margin RMSE (t vs team carryover) | mens | womens |
+| --- | --- | --- |
+| home edge only | 19.98 (18.6) | 25.01 (16.2) |
+| last season's teams | 15.03 | 18.24 |
+| last season's players, real lineups only | 19.74 (17.1) | 23.46 (15.0) |
+| last season's players, with estimated possessions | 15.12 (0.4) | 16.68 (-4.4) |
+| teams + players, real lineups only | 14.97 (-1.3) | 18.23 (-0.1) |
+| **teams + players, with estimated possessions** | **13.91 (-7.8)** | **15.62 (-10.4)** |
+
+This is what the estimated lineups are for. Rated from 2024-25's real lineups
+alone -- the six weeks from 2025-02-15 -- last season's players add nothing to
+its teams. Rated from every game, with the estimated possessions of the first
+three and a half months, they're as good as the teams on their own, and with
+them they take 1.1 points (mens) and 2.6 points (womens) off the early-season
+error.

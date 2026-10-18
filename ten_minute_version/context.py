@@ -23,7 +23,7 @@ import gzip
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 
 import pyarrow as pa
 
@@ -76,14 +76,21 @@ CONTEXT_SCHEMA = pa.schema(
 )
 
 
+def read_summaries(
+    root: str | Path, league: str, season: int
+) -> Iterator[tuple[str, dict]]:
+    """Every stored summary of a season, as (game id, summary), in id order."""
+    for path in sorted((Path(root) / league / str(season)).glob("*.json.gz")):
+        with gzip.open(path, "rt") as file:
+            yield path.name.removesuffix(".json.gz"), json.load(file)
+
+
 def read_context(root: str | Path, league: str, season: int) -> dict[str, GameContext]:
     """Every stored game of a season, by game id. A summary without a usable
     header -- no home and away team -- is skipped."""
     found: dict[str, GameContext] = {}
-    for path in sorted((Path(root) / league / str(season)).glob("*.json.gz")):
-        with gzip.open(path, "rt") as file:
-            summary = json.load(file)
-        context = parse_context(path.name.removesuffix(".json.gz"), summary)
+    for game_id, summary in read_summaries(root, league, season):
+        context = parse_context(game_id, summary)
         if context is not None:
             found[context.game_id] = context
     return found

@@ -64,6 +64,23 @@ ratings:
 	uv run python build.py ratings $(ARGS)
 
 
+# Possession rows for a season's games without substitutions, from
+# estimated lineups: make estimated ARGS="--league mens --season 2024"
+estimated:
+	uv run python build.py estimated $(ARGS)
+
+
+# Priors for the ratings, scored against none on held-out games, and last
+# season's ratings scored on this season's early games:
+#   make priors ARGS="--league mens --season 2025"
+#   make carryover ARGS="--league mens --season 2025"
+priors:
+	uv run python build.py priors $(ARGS)
+
+carryover:
+	uv run python build.py carryover $(ARGS)
+
+
 # How good the estimated lineups are, on games whose real ones are known:
 #   make evaluate ARGS="--league mens --season 2025 --train 2024"
 # `--train` fits the probabilities on another season first, for an honest
@@ -79,4 +96,4 @@ fit:
 	uv run python build.py fit $(ARGS)
 
 
-.PHONY: lint check test plays summaries stints context seasons ratings evaluate fit
+.PHONY: lint check test plays summaries stints context seasons ratings estimated priors carryover evaluate fit
