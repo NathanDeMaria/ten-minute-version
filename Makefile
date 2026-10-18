@@ -57,6 +57,13 @@ seasons:
 	done
 
 
+# Player ratings: every model and target scored on held-out games, then
+# the best fitted and written to ratings.parquet next to the season's tables.
+#   make ratings ARGS="--league mens --season 2025"
+ratings:
+	uv run python build.py ratings $(ARGS)
+
+
 # How good the estimated lineups are, on games whose real ones are known:
 #   make evaluate ARGS="--league mens --season 2025 --train 2024"
 # `--train` fits the probabilities on another season first, for an honest
@@ -72,4 +79,4 @@ fit:
 	uv run python build.py fit $(ARGS)
 
 
-.PHONY: lint check test plays summaries stints context seasons evaluate fit
+.PHONY: lint check test plays summaries stints context seasons ratings evaluate fit
