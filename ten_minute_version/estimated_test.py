@@ -1,6 +1,6 @@
 from .box_scores import STATS, BoxLine
 from .context import GameContext, Team
-from .estimated import _five, box_score
+from .estimated import _five, adds_up, box_score
 
 
 def _line(team: str, player: str, minutes: float, starter: bool) -> BoxLine:
@@ -45,3 +45,11 @@ def test_a_side_with_more_than_five_on_is_scaled_to_five():
     scaled = _five(six)
     assert abs(sum(scaled.values()) - 5) < 1e-9
     assert _five({"p1": 0.5}) == {"p1": 0.5}
+
+
+def test_a_game_whose_plays_dont_add_up_to_its_final_is_no_use():
+    # Every play credited to the home side, as in some of the old feed.
+    assert not adds_up({"home": 145, "away": 0}, (86, 59))
+    # A dropped basket and two technical free throws are fine.
+    assert adds_up({"home": 70, "away": 53}, (72, 57))
+    assert not adds_up({"home": 70, "away": 53}, None)
