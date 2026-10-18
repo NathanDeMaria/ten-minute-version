@@ -11,3 +11,5 @@ logs/
 # gets built from it. Both are rebuildable output, not source.
 plays/
 stints/
+# ...and of the game summaries endgame stores (`make summaries`).
+summaries/

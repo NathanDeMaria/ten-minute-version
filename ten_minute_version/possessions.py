@@ -29,9 +29,25 @@ from typing import Literal, Sequence
 
 from .events import FREE_THROWS, POINTS, SHOTS, Kind, offense, other
 from .lineups import Floor
-from .plays import Game
+from .plays import Game, Play
 
 Ended = Literal["fg2", "fg3", "ft", "turnover", "miss", "other"]
+
+
+@dataclass(frozen=True)
+class Shot:
+    """A field goal or free throw attempt, for expected points."""
+
+    shooter: str | None
+    # 2, 3, or 1 for a free throw
+    value: int
+    made: bool
+    # ESPN's type: JumpShot, LayUpShot, DunkShot, TipShot; a free throw's
+    # is whatever the feed calls it.
+    shot_type: str | None
+    x: float | None
+    y: float | None
+
 
 # Seconds in each period: mens play two 20-minute halves, womens four
 # 10-minute quarters, and every overtime is five minutes.
@@ -62,6 +78,7 @@ class Possession:
     oreb: int = 0
     tov: int = 0
     ended: Ended = "other"
+    shots: list[Shot] = field(default_factory=list)
     # The kind of the last play that counted towards the possession, and of
     # the last made field goal in it, for `ended`.
     _last: Kind | None = field(default=None, repr=False)
@@ -171,6 +188,8 @@ def possessions(
                 floor=floor,
             )
         current.count(kind)
+        if kind in SHOTS or kind in FREE_THROWS:
+            current.shots.append(_shot(play, kind))
         score.points[side] += POINTS.get(kind, 0)
         current.end_seconds = seconds
         if kind in FREE_THROWS and foul_floor:
@@ -179,6 +198,20 @@ def possessions(
             current.floor, current.credit_play = floor, i
     _finish(current, found)
     return found, score
+
+
+def _shot(play: Play, kind: Kind) -> Shot:
+    value = (
+        1 if kind in FREE_THROWS else 3 if kind in (Kind.MADE_3, Kind.MISSED_3) else 2
+    )
+    return Shot(
+        shooter=play.athlete_id,
+        value=value,
+        made=kind in POINTS,
+        shot_type=play.play_type,
+        x=play.x,
+        y=play.y,
+    )
 
 
 def _finish(possession: Possession | None, found: list[Possession]) -> None:

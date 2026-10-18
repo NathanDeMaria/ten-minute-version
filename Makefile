@@ -26,12 +26,28 @@ plays:
 	aws s3 sync s3://${BUCKET}/processed/basketball_plays ./plays
 
 
+# A local copy of the game summaries endgame stores, which say who played
+# each game and where (`build.py context`). ~170 MB a league-season.
+LEAGUES ?= mens womens
+SEASONS ?= 2024 2025
+summaries:
+	for league in $(LEAGUES); do for season in $(SEASONS); do \
+		aws s3 sync --only-show-errors s3://${BUCKET}/summaries/ncaabb/$$league/$$season ./summaries/$$league/$$season; \
+	done; done
+
+
 # One season's possession tables, and the checks that say how far to trust
 # them: `make stints ARGS="--league mens --season 2025"`. Writes under
 # ./stints; `--root` and `--out` move either end.
 ARGS ?=
 stints:
 	uv run python build.py stints $(ARGS)
+
+
+# Who played each game and where, from the summaries, next to the stint
+# tables: make context ARGS="--league mens --season 2025"
+context:
+	uv run python build.py context $(ARGS)
 
 
 # How good the estimated lineups are, on games whose real ones are known:
@@ -49,4 +65,4 @@ fit:
 	uv run python build.py fit $(ARGS)
 
 
-.PHONY: lint check test plays stints evaluate fit
+.PHONY: lint check test plays summaries stints context evaluate fit

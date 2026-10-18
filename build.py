@@ -3,7 +3,7 @@ Build the possession tables for a season, and say how far to trust them.
 
     uv run python build.py stints --league mens --season 2025 --root ./plays
 
-writes `{out}/league={league}/season={season}/{stints,games,players}.parquet`
+writes `{out}/league={league}/season={season}/{stints,games,players,shots}.parquet`
 and prints the checks: how many games had substitutions, the share of
 possessions that came out five on five (or five against a generic team from
 outside Division I), how often the points counted match ESPN's final, and
@@ -24,6 +24,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from fire import Fire
 
+from ten_minute_version.context import context_table, read_context
 from ten_minute_version.estimate import Rules, nearest_action_floors
 from ten_minute_version.evaluate import (
     Known,
@@ -45,13 +46,61 @@ def stints(league: str, season: int, root: str = "./plays", out: str = "./stints
     # are teams from outside Division I, then to build.
     seen = appearances(read_games(root, league, season))
     games = read_games(root, league, season)
-    stint_table, game_table, player_table = season_tables(games, seen)
+    tables = season_tables(games, seen)
     directory = Path(out) / f"league={league}" / f"season={season}"
     directory.mkdir(parents=True, exist_ok=True)
-    pq.write_table(stint_table, directory / "stints.parquet", compression="zstd")
-    pq.write_table(game_table, directory / "games.parquet", compression="zstd")
-    pq.write_table(player_table, directory / "players.parquet", compression="zstd")
-    print(json.dumps(checks(stint_table, game_table), indent=2))
+    for name, table in tables._asdict().items():
+        pq.write_table(table, directory / f"{name}.parquet", compression="zstd")
+    print(json.dumps(checks(tables.stints, tables.games), indent=2))
+
+
+def context(
+    league: str, season: int, summaries: str = "./summaries", out: str = "./stints"
+):
+    """
+    Write who played each game and where (`context.parquet`) next to the
+    season's stint tables, and check it against them: how many of the games
+    it covers, and whether the side played as generic is the one ESPN says
+    isn't in Division I.
+    """
+    contexts = read_context(summaries, league, season)
+    directory = Path(out) / f"league={league}" / f"season={season}"
+    directory.mkdir(parents=True, exist_ok=True)
+    pq.write_table(
+        context_table(contexts), directory / "context.parquet", compression="zstd"
+    )
+    games = pq.read_table(directory / "games.parquet").to_pylist()
+    lined = [game for game in games if game["has_substitutions"]]
+    agreement: dict[str, int] = {}
+    for game in lined:
+        found = contexts.get(game["game_id"])
+        if found is None:
+            continue
+        outside = [
+            side for side in ("home", "away") if not found.team(side).division_one
+        ]
+        called = game["generic_side"]
+        if called is None and not outside:
+            verdict = "both D1, none generic"
+        elif called is not None and outside == [called]:
+            verdict = "outside team generic"
+        elif called is None:
+            verdict = "outside team kept as players"
+        else:
+            verdict = "D1 team generic"
+        agreement[verdict] = agreement.get(verdict, 0) + 1
+    print(
+        json.dumps(
+            {
+                "games": len(games),
+                "with_a_summary": sum(game["game_id"] in contexts for game in games),
+                "neutral_site": sum(c.neutral_site for c in contexts.values()),
+                "conference_game": sum(c.conference_game for c in contexts.values()),
+                "generic_side_vs_espn": agreement,
+            },
+            indent=2,
+        )
+    )
 
 
 def checks(stint_table: pa.Table, game_table: pa.Table) -> dict:
@@ -176,4 +225,4 @@ def fit(league: str, seasons, root: str = "./plays", old_feed: bool = False):
 
 
 if __name__ == "__main__":
-    Fire({"stints": stints, "evaluate": evaluate, "fit": fit})
+    Fire({"stints": stints, "context": context, "evaluate": evaluate, "fit": fit})

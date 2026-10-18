@@ -11,7 +11,9 @@ counted by how they ended.
 
 ```bash
 make plays                                         # endgame's processed plays, locally
+make summaries                                     # endgame's game summaries, 2024 and 2025
 make stints ARGS="--league mens --season 2025"     # -> ./stints/league=mens/season=2025/
+make context ARGS="--league mens --season 2025"    # who played and where, next to them
 ```
 
 ## What the data allows
@@ -24,13 +26,16 @@ without substitutions gets a report row and no stints.
 
 ## The tables
 
-`build.py stints` writes three, under `{out}/league={league}/season={season}/`:
+`build.py stints` writes four, under `{out}/league={league}/season={season}/`,
+and `build.py context` a fifth:
 
 | table | one row per | |
 | --- | --- | --- |
 | `stints.parquet` | stint and side with the ball | the possession table |
 | `games.parquet` | game | how far to trust it |
 | `players.parquet` | player | ESPN athlete id to name |
+| `shots.parquet` | field goal or free throw in a stint | shooter, value, made, type and where from, for expected points; `(game_id, stint, offense_side)` joins it to its row |
+| `context.parquet` | game | the teams, their conferences and whether they're D1, neutral site, conference game -- from ESPN's game summary |
 
 A **stint** is a run of possessions with the same ten players on the floor. It
 gives one row per side that had the ball in it: that side's five
@@ -50,12 +55,14 @@ group-by. See `ten_minute_version/stints.py` for the schemas.
 **Teams from outside Division I** play as one generic team: their side of a
 row is the single id `"generic"`, against the other side's five, and the game
 row's `generic_side` says which side that was. Most of their players have no
-ESPN id, so they can't be followed one by one; the ones who do turn up in
-only the few games their team plays against D1, which is how they're told
-apart from a D1 team with a player ESPN hasn't linked (`opponents.py`). In
-2025-26 that's 535 mens and 395 womens games, and it keeps 5,795 mens and
-5,478 womens possessions the table used to leave out, most of them in
-November and December.
+ESPN id, so they can't be followed one by one; the ones who do turn up in only
+the few games their team plays against D1, which is how they're told apart
+from a D1 team with a player ESPN hasn't linked (`opponents.py`). In 2025-26
+that's 535 mens and 395 womens games, and it keeps 5,795 mens and 5,478 womens
+possessions the table used to leave out, most of them in November and
+December. ESPN's own Division I flag in the summaries (`build.py context`)
+agrees with every one: no side called generic is a D1 team, and no outside
+team was kept as players.
 
 ## How a game becomes possessions
 
@@ -68,6 +75,7 @@ November and December.
 | `stints` | possessions grouped into the tables above |
 | `names` | ids for the plays that only name their player |
 | `opponents` | which side, if either, is a team from outside Division I |
+| `context` | who played each game and where, from the game summaries endgame stores |
 | `estimate`, `probabilities`, `evaluate` | lineups where the feed has no substitutions |
 
 - **Starters** aren't in the feed. A player whose first appearance is anything
