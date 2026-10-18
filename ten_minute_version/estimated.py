@@ -5,7 +5,7 @@ before 2025-02-15 -- from estimated lineups.
 Each game's floors are estimated (`estimate`) with its own box score's
 starters and minutes (`box_scores`), turned into each player's chance of
 being on the floor at every play (`probabilities`, the box-score release),
-and each possession is credited to every player by his chance at its credit
+and each possession is credited to every player by their chance at its credit
 play -- the play `possessions` gives its floor from. A row is one
 possession, its players weighted by those chances (five a side), in the
 shape `ratings.Rows` reads: `stint` numbers the game's possessions, so the
@@ -13,7 +13,17 @@ shot table joins the same way the stint table's does.
 
 A team from outside Division I plays as the generic team here too
 (`opponents`). A game with no summary, so no box score, or whose box score
-doesn't name five starters a side, is left out.
+doesn't name five starters a side, is left out -- and so is one whose plays
+don't add up to its final score.
+
+That last is for the feed before 2019, which has games whose plays are
+wrong: every play credited to the home side, so Auburn beat Lipscomb by 145
+on 2019-12-29 (86-59), or a game that repeats itself to 1,000 plays. A side
+whose possessions' points miss its final by more than 10 marks one: 3-6%
+of the games in 2014-15 and 2017-18, in both leagues, and a few in most
+seasons. Smaller misses are left in. Technical free throws are no one's
+possession, and before 2025 the feed drops a scoring play now and then:
+the counted points are exact in 70-93% of games and within three in 90-99%.
 """
 
 from collections import defaultdict
@@ -35,7 +45,7 @@ from .lineups import SIDES
 from .names import resolve_names
 from .opponents import GENERIC, Opponents
 from .plays import Game
-from .possessions import possessions
+from .possessions import Possession, possessions
 from .probabilities import OnFloorModel
 from .stints import SHOT_SCHEMA, shot_row
 
@@ -119,6 +129,8 @@ def estimated_tables(
         )
         generic = opponents.generic_side(game)
         found, _ = possessions(game, kinds, floors)
+        if not adds_up(_counted(found), _final(game)):
+            continue
         for number, possession in enumerate(found, start=1):
             home, away = chances[possession.credit_play]
             on = {"home": _five(home), "away": _five(away)}
@@ -148,6 +160,39 @@ def estimated_tables(
     return (
         pa.Table.from_pylist(rows, schema=ESTIMATED_SCHEMA),
         pa.Table.from_pylist(shots, schema=SHOT_SCHEMA),
+    )
+
+
+# How far a side's counted points may miss its final, for `adds_up`.
+POINTS_SLACK = 10
+
+
+def adds_up(counted: Mapping[str, int], final: tuple[int, int] | None) -> bool:
+    """Whether each side's counted points are within `POINTS_SLACK` of its
+    final, (home, away), from the plays' running score."""
+    if final is None:
+        return False
+    return all(
+        abs(counted.get(side, 0) - score) <= POINTS_SLACK
+        for side, score in zip(SIDES, final)
+    )
+
+
+def _counted(found: Iterable[Possession]) -> dict[str, int]:
+    counted = {side: 0 for side in SIDES}
+    for possession in found:
+        counted[possession.offense] += possession.points
+    return counted
+
+
+def _final(game: Game) -> tuple[int, int] | None:
+    return next(
+        (
+            (play.home_score, play.away_score)
+            for play in reversed(game.plays)
+            if play.home_score is not None and play.away_score is not None
+        ),
+        None,
     )
 
 

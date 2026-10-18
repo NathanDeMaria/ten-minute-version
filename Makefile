@@ -47,13 +47,15 @@ context:
 	uv run python build.py context $(ARGS)
 
 
-# Both, for every league and season in ./plays, with their checks.
+# Both, and the estimated possessions, for every league and season in
+# ./plays, with their checks.
 seasons:
 	for dir in plays/league=*/season=*; do \
 		league=$${dir#plays/league=}; league=$${league%%/*}; season=$${dir##*=}; \
 		echo "$$league $$season"; \
 		uv run python build.py stints --league $$league --season $$season && \
-		uv run python build.py context --league $$league --season $$season || exit 1; \
+		uv run python build.py context --league $$league --season $$season && \
+		uv run python build.py estimated --league $$league --season $$season || exit 1; \
 	done
 
 
@@ -80,6 +82,11 @@ priors:
 carryover:
 	uv run python build.py carryover $(ARGS)
 
+# ...and for every season, each from the one before, after `make seasons`:
+#   make carryovers ARGS="--league mens"
+carryovers:
+	uv run python build.py carryovers $(ARGS)
+
 
 # How good the estimated lineups are, on games whose real ones are known:
 #   make evaluate ARGS="--league mens --season 2025 --train 2024"
@@ -96,4 +103,4 @@ fit:
 	uv run python build.py fit $(ARGS)
 
 
-.PHONY: lint check test plays summaries stints context seasons ratings estimated priors carryover evaluate fit
+.PHONY: lint check test plays summaries stints context seasons ratings estimated priors carryover carryovers evaluate fit

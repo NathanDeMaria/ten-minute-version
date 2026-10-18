@@ -20,8 +20,8 @@ make priors ARGS="--league mens --season 2025"     # what to shrink players towa
 make carryover ARGS="--league mens --season 2025"  # last season's ratings on this season's games
 ```
 
-`make seasons` builds the stint tables and context for every league and season
-in `./plays`, 2013 (2013-14) on.
+`make seasons` builds the stint tables, context and estimated possessions for
+every league and season in `./plays`, 2013 (2013-14) on.
 
 ## What the data allows
 
@@ -266,7 +266,7 @@ Where player ratings should earn their keep is the next season, when a team's
 minutes have turned over and its rating carries over badly
 (`carryover`, `make carryover`). Each 2025-26 game from 2025-11-17 to
 12-31 is predicted with its real lineups from 2024-25's ratings: each player
-on the floor at his rating from last season, a player it didn't rate
+on the floor at their rating from last season, a player it didn't rate
 counted as a newcomer. How much of each term to use is fitted on 2025-11-03
 to 11-16.
 
@@ -285,3 +285,30 @@ its teams. Rated from every game, with the estimated possessions of the first
 three and a half months, they're as good as the teams on their own, and with
 them they take 1.1 points (mens) and 2.6 points (womens) off the early-season
 error.
+
+**Every season** (`make carryovers`, after `make seasons`): the same test for
+each season from 2014-15 on, from the one before, every game of both seasons
+on estimated lineups until 2025. Weights are fitted on each season's first
+two weeks (2020-21 started on Nov 25) and scored to Dec 31:
+
+| season | mens games | teams | teams + players | t | womens games | teams | teams + players | t |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2014-15 | 1,229 | 13.48 | 12.78 | -6.2 | 315 | 15.98 | 16.12 | 1.5 |
+| 2015-16 | 1,356 | 13.61 | 12.82 | -6.8 | 364 | 15.64 | 15.18 | -1.8 |
+| 2016-17 | 1,527 | 13.49 | 12.86 | -4.7 | 410 | 15.27 | 15.14 | -0.7 |
+| 2017-18 | 1,561 | 14.38 | 13.42 | -6.9 | 441 | 16.05 | 15.91 | -1.4 |
+| 2018-19 | 1,373 | 14.20 | 13.60 | -3.7 | 420 | 15.93 | 15.66 | -2.4 |
+| 2019-20 | 1,388 | 15.07 | 13.77 | -8.1 | 1,323 | 18.47 | 17.88 | -3.9 |
+| 2020-21 | 623 | 14.24 | 13.72 | -3.8 | 534 | 15.82 | 15.49 | -1.1 |
+| 2021-22 | 1,321 | 16.87 | 14.31 | -10.8 | 1,287 | 18.34 | 15.61 | -8.3 |
+| 2022-23 | 1,669 | 14.60 | 13.28 | -8.3 | 1,582 | 16.34 | 14.92 | -6.8 |
+| 2023-24 | 1,668 | 14.85 | 13.89 | -7.8 | 1,561 | 16.87 | 15.21 | -7.7 |
+| 2024-25 | 1,805 | 14.53 | 13.45 | -7.2 | 1,622 | 17.10 | 15.26 | -8.1 |
+| 2025-26 | 1,909 | 15.03 | 13.91 | -7.8 | 1,747 | 18.25 | 15.62 | -10.4 |
+| all | 17,429 | 14.58 | 13.50 | -23.9 | 11,606 | 17.18 | 15.69 | -18.9 |
+
+Last season's players beat its teams in every mens season, by 0.5 to 2.6
+points, and by most the season after COVID, when a team's 2020-21 said least
+about it. In womens they do from 2019-20, the first season with plays for
+every game; before it, with plays for only a quarter of games, last season's
+players are rated from too few of them to add much.

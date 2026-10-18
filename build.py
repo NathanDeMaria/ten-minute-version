@@ -19,16 +19,17 @@ in `ten_minute_version/releases/`.
 
 import json
 from collections import Counter
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
+import numpy as np
 import pyarrow as pa
 import pyarrow.compute  # noqa: F401  (pa.compute)
 import pyarrow.parquet as pq
 from fire import Fire
 
 from ten_minute_version.box_scores import read_box_lines
-from ten_minute_version.carryover import compare, game_terms, variants
+from ten_minute_version.carryover import Result, compare, game_terms, variants
 from ten_minute_version.context import context_table, read_context
 from ten_minute_version.estimate import Rules, nearest_action_floors, season_context
 from ten_minute_version.estimated import estimated_tables
@@ -396,16 +397,102 @@ def carryover(
     """
     Whether last season's ratings predict this season's early games
     (`ten_minute_version.carryover`): team carryover, last season's players
-    from its real lineups alone and with its estimated possessions, and
-    each with the team carryover. Weights are fitted on the games through
-    `tune_until` (default: the season's first two weeks, to Nov 16) and
-    scored on the rest through `test_until` (default: Dec 31).
+    from its real lineups alone (where it has any) and with its estimated
+    possessions, and each with the team carryover. Weights are fitted on the
+    games through `tune_until` (default: the season's first two weeks, to
+    Nov 16 in 2025-26 and Dec 8 in 2020-21, which started late) and scored on
+    the rest through `test_until` (default: Dec 31).
     """
-    tune_end = date.fromisoformat(tune_until) if tune_until else date(season, 11, 16)
+    results, tuned, scored = _carryover(
+        league,
+        season,
+        target,
+        penalty,
+        team_penalty,
+        tune_until,
+        test_until,
+        summaries,
+        tables,
+    )
+    print(f"weights fitted on {tuned} games, scored on {scored}")
+    print(f"{'from last season':34s} {'margin RMSE':>11s} {'t vs team':>9s}")
+    for result in results:
+        t = "" if result.name == "team carryover" else f"{result.t_vs_team:.1f}"
+        print(f"{result.name:34s} {result.rmse:11.3f} {t:>9s}")
+
+
+def carryovers(
+    league: str,
+    first: int = 2014,
+    last: int = 2025,
+    target: str = "half on 3s and FTs",
+    penalty: float = 300,
+    team_penalty: float = 30,
+    summaries: str = "./summaries",
+    tables: str = "./stints",
+):
+    """
+    `carryover` for every season from `first` to `last`, each from the one
+    before, a line a season -- and over all of them, every season's scored
+    games together.
+    """
+    best = "team + players, with estimated"
+    pooled: dict[str, list[np.ndarray]] = {"team carryover": [], best: []}
+    print(
+        f"{'season':>6s} {'games':>6s} {'team carryover':>14s}"
+        f" {'team + players':>14s} {'t':>6s}"
+    )
+    for season in range(first, last + 1):
+        results, _, scored = _carryover(
+            league,
+            season,
+            target,
+            penalty,
+            team_penalty,
+            "",
+            "",
+            summaries,
+            tables,
+            quiet=True,
+        )
+        by = {r.name: r for r in results}
+        for name in pooled:
+            pooled[name].append(by[name].errors)
+        print(
+            f"{season:6d} {scored:6d} {by['team carryover'].rmse:14.2f}"
+            f" {by[best].rmse:14.2f} {by[best].t_vs_team:6.1f}",
+            flush=True,
+        )
+    team, players = (np.concatenate(pooled[name]) for name in pooled)
+    gap = players**2 - team**2
+    t = gap.mean() / (gap.std(ddof=1) / np.sqrt(len(gap)))
+    print(
+        f"{'all':>6s} {len(team):6d} {np.sqrt(np.mean(team**2)):14.2f}"
+        f" {np.sqrt(np.mean(players**2)):14.2f} {t:6.1f}"
+    )
+
+
+def _carryover(
+    league: str,
+    season: int,
+    target: str,
+    penalty: float,
+    team_penalty: float,
+    tune_until: str,
+    test_until: str,
+    summaries: str,
+    tables: str,
+    quiet: bool = False,
+) -> tuple[list[Result], int, int]:
+    """`carryover`'s results, and how many games it tuned and scored on."""
     test_end = date.fromisoformat(test_until) if test_until else date(season, 12, 31)
+    last_directory = Path(tables) / f"league={league}" / f"season={season - 1}"
+    lined = pq.read_metadata(last_directory / "stints.parquet").num_rows > 0
     players: dict[str, dict[str, tuple[float, float]]] = {}
     teams: dict[str, tuple[float, float]] = {}
     for name, with_estimated in (("real lineups", False), ("with estimated", True)):
+        if not with_estimated and not lined:
+            continue
         built = _season_rows(league, season - 1, summaries, tables, with_estimated)
         assert built is not None, f"no tables for {league} {season - 1}"
         last_rows, last_shots = built
@@ -424,11 +511,14 @@ def carryover(
                 )
                 for i, t in enumerate(team_design.teams)
             }
-        print(
-            f"last season, {name}: {len(players[name])} players, {len(set(last_rows.game_id))} games",
-            flush=True,
-        )
-    built = _season_rows(league, season, summaries, tables)
+        if not quiet:
+            print(
+                f"last season, {name}: {len(players[name])} players,"
+                f" {len(set(last_rows.game_id))} games",
+                flush=True,
+            )
+    # This season's lineups as well: estimated, before there were real ones.
+    built = _season_rows(league, season, summaries, tables, with_estimated=True)
     assert built is not None, f"no tables for {league} {season}"
     rows, _ = built
     directory = Path(tables) / f"league={league}" / f"season={season}"
@@ -437,16 +527,14 @@ def carryover(
         for r in pq.read_table(directory / "games.parquet").to_pylist()
     }
     games = sorted({g for g in rows.game_id if day[g] <= test_end})
+    first = min(day[g] for g in games)
+    tune_end = (
+        date.fromisoformat(tune_until) if tune_until else first + timedelta(days=13)
+    )
     terms = game_terms(rows, games, teams, players)
     results = compare(terms, day, tune_end, variants(list(players)))
     tuned = sum(day[g] <= tune_end for g in games)
-    print(
-        f"weights fitted on {tuned} games to {tune_end}, scored on {len(games) - tuned} to {test_end}"
-    )
-    print(f"{'from last season':34s} {'margin RMSE':>11s} {'t vs team':>9s}")
-    for result in results:
-        t = "" if result.name == "team carryover" else f"{result.t_vs_team:.1f}"
-        print(f"{result.name:34s} {result.rmse:11.3f} {t:>9s}")
+    return results, tuned, len(games) - tuned
 
 
 def checks(stint_table: pa.Table, game_table: pa.Table) -> dict:
@@ -579,6 +667,7 @@ if __name__ == "__main__":
             "priors": priors,
             "estimated": estimated,
             "carryover": carryover,
+            "carryovers": carryovers,
             "evaluate": evaluate,
             "fit": fit,
         }
