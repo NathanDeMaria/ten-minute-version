@@ -22,6 +22,7 @@ from collections import Counter
 from pathlib import Path
 
 import pyarrow as pa
+import pyarrow.compute  # noqa: F401  (pa.compute)
 import pyarrow.parquet as pq
 from fire import Fire
 
@@ -45,6 +46,16 @@ from ten_minute_version.opponents import (
 )
 from ten_minute_version.plays import read_games
 from ten_minute_version.probabilities import FEATURES, OnFloorModel
+from ten_minute_version.ratings import (
+    TARGETS,
+    Design,
+    Rows,
+    cross_validate,
+    penalties,
+    ratings_table,
+    solve,
+    targets,
+)
 from ten_minute_version.stints import season_tables
 
 
@@ -122,6 +133,76 @@ def context(
             indent=2,
         )
     )
+
+
+def ratings(
+    league: str,
+    season: int,
+    summaries: str = "./summaries",
+    tables: str = "./stints",
+    folds: int = 5,
+):
+    """
+    Score the rating models and targets on held-out games, then fit the best
+    on every game and write `ratings.parquet` next to the season's tables.
+    """
+    directory = Path(tables) / f"league={league}" / f"season={season}"
+    contexts = read_context(summaries, league, season)
+    stints = pq.read_table(directory / "stints.parquet")
+    # A game ESPN has no summary for has no teams and no venue: left out.
+    games = stints.column("game_id").to_pylist()
+    stints = stints.filter(pa.array([game_id in contexts for game_id in games]))
+    rows = Rows.build(stints, contexts)
+    shot_rows = pq.read_table(directory / "shots.parquet").to_pylist()
+    scores = cross_validate(rows, shot_rows, folds=folds)
+    print(f"{len(rows)} stint rows, {len(set(rows.game_id))} games, {folds} folds")
+    best = next(score for score in scores if score.model == "players")
+    # The best penalty for each model and target, with how sure its gap to
+    # the best players model is: a t statistic on the same held-out games.
+    shown: set[tuple[str, str]] = set()
+    print(
+        f"{'model':9s} {'target':22s} {'penalty':>7s} {'margin RMSE':>11s}"
+        f" {'MAE':>6s} {'t vs best':>9s}"
+    )
+    for score in scores:
+        if (score.model, score.target) in shown:
+            continue
+        shown.add((score.model, score.target))
+        t = "" if score is best else f"{score.paired_t(best):.1f}"
+        print(
+            f"{score.model:9s} {score.target:22s} {score.penalty:7g}"
+            f" {score.rmse:11.3f} {score.mae:6.3f} {t:>9s}"
+        )
+    fitted = targets(rows, shot_rows, set(rows.game_id))
+    design = Design.build(rows)
+    b = solve(
+        design,
+        TARGETS[best.target](fitted),
+        rows.possessions,
+        penalties(design, player=best.penalty),
+    )
+    names = {
+        r["athlete_id"]: r["athlete_name"]
+        for r in pq.read_table(directory / "players.parquet").to_pylist()
+    }
+    team_names = {
+        c.team(side).team_id: c.team(side).name
+        for c in contexts.values()
+        for side in ("home", "away")
+    }
+    table = ratings_table(league, season, rows, design, b, names, team_names)
+    pq.write_table(table, directory / "ratings.parquet", compression="zstd")
+    home = b[design.home] * 100
+    print(
+        f"\nbest: {best.target}, penalty {best.penalty:.0f}. Home edge {home:+.1f}"
+        f" per 100 possessions at each end, {2 * home * 0.69:+.1f} points a game"
+    )
+    played = [r for r in table.to_pylist() if r["offense_possessions"] >= 1000]
+    for r in sorted(played, key=lambda r: -r["total"])[:15]:
+        print(
+            f"  {r['athlete_name'] or r['athlete_id']:24s} {r['team'] or '':28s}"
+            f" off {r['offense']:+5.1f} def {r['defense']:+5.1f} total {r['total']:+5.1f}"
+        )
 
 
 def checks(stint_table: pa.Table, game_table: pa.Table) -> dict:
@@ -246,4 +327,12 @@ def fit(league: str, seasons, root: str = "./plays", old_feed: bool = False):
 
 
 if __name__ == "__main__":
-    Fire({"stints": stints, "context": context, "evaluate": evaluate, "fit": fit})
+    Fire(
+        {
+            "stints": stints,
+            "context": context,
+            "ratings": ratings,
+            "evaluate": evaluate,
+            "fit": fit,
+        }
+    )
