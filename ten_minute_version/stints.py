@@ -164,16 +164,18 @@ def game_stints(game: Game, appearances: Mapping[str, int] | None = None) -> Gam
     game = resolve_names(game)
     kinds = [classify(play) for play in game.plays]
     report = _report(game)
+    # Said for every game, stints or not: the estimated lineups play the
+    # same side as generic, and it's checked against ESPN's own D1 flag.
+    generic = generic_side(game, appearances) if appearances is not None else None
+    report["generic_side"] = generic
     if not any(kind in (Kind.SUB_IN, Kind.SUB_OUT) for kind in kinds):
         return GameStints([], report, [])
     floors, lineups = on_floor(game.plays, kinds)
     found, score = possessions(game, kinds, floors)
-    generic = generic_side(game, appearances) if appearances is not None else None
     rows, dropped, shots = _rows(game, found, generic)
     starters = dict(zip(SIDES, lineups.starters))
     report.update(
         has_substitutions=True,
-        generic_side=generic,
         starters_found=all(starters[side] == 5 for side in SIDES if side != generic),
         repairs=lineups.repairs,
         possessions=len(found),
