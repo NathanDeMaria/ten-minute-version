@@ -49,6 +49,11 @@ class Rows:
     offense_home: np.ndarray  # bool
     offense: list[list[str]]
     defense: list[list[str]]
+    # How much of each listed player was on the floor: 1 for everyone in a
+    # stint, and for an estimated possession (`estimated`) his chance of
+    # being there, adding up to five a side.
+    offense_weights: list[list[float]]
+    defense_weights: list[list[float]]
     possessions: np.ndarray
     points: np.ndarray
     # +1 home offense, -1 away offense, 0 at a neutral site
@@ -76,11 +81,19 @@ class Rows:
             other = "away" if side == "home" else "home"
             offense_team[i] = context.team(side).team_id
             defense_team[i] = context.team(other).team_id
+
+        def weights(column: str, players: str) -> list[list[float]]:
+            if column in t:
+                return [list(w) for w in t[column]]
+            return [[1.0] * len(five) for five in t[players]]
+
         return cls(
             game_id=np.array(t["game_id"], object),
             offense_home=home_side,
             offense=t["offense_players"],
             defense=t["defense_players"],
+            offense_weights=weights("offense_weights", "offense_players"),
+            defense_weights=weights("defense_weights", "defense_players"),
             possessions=np.array(t["possessions"], float),
             points=np.array(t["points"], float),
             home=home,
@@ -158,34 +171,34 @@ class Design:
         r: list[int] = []
         c: list[int] = []
         v: list[float] = []
+
+        def add(row: int, column: int, value: float) -> None:
+            r.append(row)
+            c.append(column)
+            v.append(value)
+
         for i in range(len(rows)):
             if players:
-                for p in rows.offense[i]:
-                    (
-                        r.append(i),
-                        c.append(design.player_column(player_at[p], "offense")),
-                        v.append(1.0),
-                    )
-                for p in rows.defense[i]:
-                    (
-                        r.append(i),
-                        c.append(design.player_column(player_at[p], "defense")),
-                        v.append(-1.0),
-                    )
+                for p, w in zip(rows.offense[i], rows.offense_weights[i]):
+                    add(i, design.player_column(player_at[p], "offense"), w)
+                for p, w in zip(rows.defense[i], rows.defense_weights[i]):
+                    add(i, design.player_column(player_at[p], "defense"), -w)
             if teams:
-                for team, side, sign in (
-                    (rows.offense_team[i], "offense", 1.0),
-                    (rows.defense_team[i], "defense", -1.0),
-                ):
-                    if team:
-                        (
-                            r.append(i),
-                            c.append(design.team_column(team_at[team], side)),
-                            v.append(sign),
-                        )
-            r.append(i), c.append(design.baseline), v.append(1.0)
+                if rows.offense_team[i]:
+                    add(
+                        i,
+                        design.team_column(team_at[rows.offense_team[i]], "offense"),
+                        1.0,
+                    )
+                if rows.defense_team[i]:
+                    add(
+                        i,
+                        design.team_column(team_at[rows.defense_team[i]], "defense"),
+                        -1.0,
+                    )
+            add(i, design.baseline, 1.0)
             if rows.home[i]:
-                r.append(i), c.append(design.home), v.append(rows.home[i])
+                add(i, design.home, rows.home[i])
         return cls(
             np.array(r), np.array(c), np.array(v), len(rows), player_ids, team_ids
         )
@@ -452,10 +465,17 @@ RATINGS_SCHEMA = pa.schema(
         pa.field("team", pa.string()),
         pa.field("offense_possessions", pa.int32(), nullable=False),
         pa.field("defense_possessions", pa.int32(), nullable=False),
-        # Per 100 possessions; defense is points kept off the board.
+        # Per 100 possessions; defense is points kept off the board. With
+        # team columns in the fit, these are his rating against his team's
+        # plus a fifth of his team's, so a lineup's five still add up to
+        # what the fit predicts for it...
         pa.field("offense", pa.float32(), nullable=False),
         pa.field("defense", pa.float32(), nullable=False),
         pa.field("total", pa.float32(), nullable=False),
+        # ...and these his rating against his team's alone (the same as the
+        # three above without team columns).
+        pa.field("offense_vs_team", pa.float32(), nullable=False),
+        pa.field("defense_vs_team", pa.float32(), nullable=False),
     ]
 )
 
@@ -472,31 +492,38 @@ def ratings_table(
     offense_possessions: dict[str, float] = {}
     defense_possessions: dict[str, float] = {}
     team_time: dict[str, dict[str, float]] = {}
-    for five, team, n, seen in (
-        *zip(
-            rows.offense,
-            rows.offense_team,
-            rows.possessions,
-            [offense_possessions] * len(rows),
-        ),
-        *zip(
-            rows.defense,
-            rows.defense_team,
-            rows.possessions,
-            [defense_possessions] * len(rows),
-        ),
-    ):
-        for p in five:
-            seen[p] = seen.get(p, 0.0) + n
-            if team:
-                by_team = team_time.setdefault(p, {})
-                by_team[team] = by_team.get(team, 0.0) + n
+    for i in range(len(rows)):
+        n = rows.possessions[i]
+        for players, weights, team, seen in (
+            (
+                rows.offense[i],
+                rows.offense_weights[i],
+                rows.offense_team[i],
+                offense_possessions,
+            ),
+            (
+                rows.defense[i],
+                rows.defense_weights[i],
+                rows.defense_team[i],
+                defense_possessions,
+            ),
+        ):
+            for p, w in zip(players, weights):
+                seen[p] = seen.get(p, 0.0) + w * n
+                if team:
+                    by_team = team_time.setdefault(p, {})
+                    by_team[team] = by_team.get(team, 0.0) + w * n
+    team_at = {t: i for i, t in enumerate(design.teams)}
     out = []
     for i, p in enumerate(design.players):
-        offense = 100 * b[design.player_column(i, "offense")]
-        defense = 100 * b[design.player_column(i, "defense")]
+        offense_vs_team = 100 * b[design.player_column(i, "offense")]
+        defense_vs_team = 100 * b[design.player_column(i, "defense")]
         teams = team_time.get(p, {})
         team = max(teams, key=lambda t: (teams[t], t)) if teams else None
+        offense, defense = offense_vs_team, defense_vs_team
+        if team in team_at:
+            offense += 100 * b[design.team_column(team_at[team], "offense")] / 5
+            defense += 100 * b[design.team_column(team_at[team], "defense")] / 5
         out.append(
             {
                 "league": league,
@@ -510,6 +537,8 @@ def ratings_table(
                 "offense": offense,
                 "defense": defense,
                 "total": offense + defense,
+                "offense_vs_team": offense_vs_team,
+                "defense_vs_team": defense_vs_team,
             }
         )
     return pa.Table.from_pylist(out, schema=RATINGS_SCHEMA)

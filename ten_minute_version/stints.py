@@ -247,8 +247,7 @@ def _rows(
             rows[key] = _new_row(game, stint, possession, stint_start, floor)
         _add(rows[key], possession)
         shots += [
-            _shot_row(game, stint, possession.offense, shot)
-            for shot in possession.shots
+            shot_row(game, stint, possession.offense, shot) for shot in possession.shots
         ]
     # A stint ends at its last possession, whichever side had it, so both of
     # its rows say the same.
@@ -260,7 +259,7 @@ def _rows(
     return list(rows.values()), dropped, shots
 
 
-def _shot_row(game: Game, stint: int, offense: str, shot: Shot) -> dict:
+def shot_row(game: Game, stint: int, offense: str, shot: Shot) -> dict:
     return {
         "league": game.league,
         "season": game.season,

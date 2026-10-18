@@ -103,3 +103,27 @@ def test_a_games_margin_is_home_minus_away():
         built, np.array([1.1, 1.0]), np.array(["g1"], object)
     )
     assert np.isclose(predicted[0], 1.0) and actual[0] == 3.0
+
+
+def test_with_team_columns_a_rating_carries_a_fifth_of_its_teams():
+    from .ratings import ratings_table
+
+    built = Rows.build(
+        _stints(
+            [
+                ("g1", 1, "home", HOME, AWAY, 10, 12),
+                ("g1", 1, "away", AWAY, HOME, 10, 9),
+            ]
+        ),
+        _contexts(),
+    )
+    design = Design.build(built, teams=True)
+    b = np.zeros(design.columns)
+    h1 = design.players.index("h1")
+    b[design.player_column(h1, "offense")] = 0.02
+    b[design.team_column(design.teams.index("H"), "offense")] = 0.05
+    table = ratings_table("mens", 2025, built, design, b, {}, {"H": "Home"})
+    row = next(r for r in table.to_pylist() if r["athlete_id"] == "h1")
+    assert np.isclose(row["offense_vs_team"], 2.0)
+    assert np.isclose(row["offense"], 2.0 + 5.0 / 5)
+    assert row["team"] == "Home"

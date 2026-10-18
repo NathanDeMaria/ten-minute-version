@@ -19,6 +19,7 @@ in `ten_minute_version/releases/`.
 
 import json
 from collections import Counter
+from datetime import date
 from pathlib import Path
 
 import pyarrow as pa
@@ -26,8 +27,11 @@ import pyarrow.compute  # noqa: F401  (pa.compute)
 import pyarrow.parquet as pq
 from fire import Fire
 
+from ten_minute_version.box_scores import read_box_lines
+from ten_minute_version.carryover import compare, game_terms, variants
 from ten_minute_version.context import context_table, read_context
-from ten_minute_version.estimate import Rules, nearest_action_floors
+from ten_minute_version.estimate import Rules, nearest_action_floors, season_context
+from ten_minute_version.estimated import estimated_tables
 from ten_minute_version.evaluate import (
     Known,
     accuracy,
@@ -45,6 +49,7 @@ from ten_minute_version.opponents import (
     schedules,
 )
 from ten_minute_version.plays import read_games
+from ten_minute_version.priors import compare_priors, player_ratings
 from ten_minute_version.probabilities import FEATURES, OnFloorModel
 from ten_minute_version.ratings import (
     TARGETS,
@@ -141,6 +146,8 @@ def ratings(
     summaries: str = "./summaries",
     tables: str = "./stints",
     folds: int = 5,
+    team_penalty: float = 30,
+    anchored_penalty: float = 1000,
 ):
     """
     Score the rating models and targets on held-out games, then fit the best
@@ -173,13 +180,18 @@ def ratings(
             f"{score.model:9s} {score.target:22s} {score.penalty:7g}"
             f" {score.rmse:11.3f} {score.mae:6.3f} {t:>9s}"
         )
+    # The ratings written come from the best target, fitted with team
+    # columns: players pulled toward their team rather than toward zero beat
+    # players alone on held-out games (`priors`), at these penalties. Pass
+    # team_penalty=0 for the players model the table above picked.
     fitted = targets(rows, shot_rows, set(rows.game_id))
-    design = Design.build(rows)
+    design = Design.build(rows, teams=team_penalty > 0)
+    player_penalty = anchored_penalty if team_penalty > 0 else best.penalty
     b = solve(
         design,
         TARGETS[best.target](fitted),
         rows.possessions,
-        penalties(design, player=best.penalty),
+        penalties(design, player=player_penalty, team=team_penalty),
     )
     names = {
         r["athlete_id"]: r["athlete_name"]
@@ -194,8 +206,9 @@ def ratings(
     pq.write_table(table, directory / "ratings.parquet", compression="zstd")
     home = b[design.home] * 100
     print(
-        f"\nbest: {best.target}, penalty {best.penalty:.0f}. Home edge {home:+.1f}"
-        f" per 100 possessions at each end, {2 * home * 0.69:+.1f} points a game"
+        f"\nwritten: {best.target}, player penalty {player_penalty:g}, team penalty"
+        f" {team_penalty:g}. Home edge {home:+.1f} per 100 possessions at each end,"
+        f" {2 * home * 0.69:+.1f} points a game"
     )
     played = [r for r in table.to_pylist() if r["offense_possessions"] >= 1000]
     for r in sorted(played, key=lambda r: -r["total"])[:15]:
@@ -203,6 +216,237 @@ def ratings(
             f"  {r['athlete_name'] or r['athlete_id']:24s} {r['team'] or '':28s}"
             f" off {r['offense']:+5.1f} def {r['defense']:+5.1f} total {r['total']:+5.1f}"
         )
+
+
+def estimated(
+    league: str,
+    season: int,
+    root: str = "./plays",
+    summaries: str = "./summaries",
+    out: str = "./stints",
+):
+    """
+    Possession rows from estimated lineups for the season's games without
+    substitutions (`ten_minute_version.estimated`): `estimated.parquet` and
+    `estimated_shots.parquet` next to the stint tables.
+    """
+    contexts = read_context(summaries, league, season)
+    box_lines = list(read_box_lines(summaries, league, season))
+    seen = appearances(read_games(root, league, season))
+    roles = season_context(read_games(root, league, season))
+    model = OnFloorModel.load(league, with_box_scores=True)
+    rows, shots = estimated_tables(
+        read_games(root, league, season),
+        box_lines,
+        contexts,
+        model,
+        roles,
+        Opponents(seen, contexts),
+    )
+    directory = Path(out) / f"league={league}" / f"season={season}"
+    directory.mkdir(parents=True, exist_ok=True)
+    pq.write_table(rows, directory / "estimated.parquet", compression="zstd")
+    pq.write_table(shots, directory / "estimated_shots.parquet", compression="zstd")
+    games = len(set(rows.column("game_id").to_pylist()))
+    print(
+        f"{rows.num_rows} estimated possessions in {games} games, {shots.num_rows} shots"
+    )
+
+
+def _season_rows(
+    league: str, season: int, summaries: str, tables: str, with_estimated: bool = False
+) -> tuple[Rows, list[dict]] | None:
+    """
+    A season's stint rows (games with a summary only) and shots, if built --
+    and with the estimated possessions of its games without substitutions,
+    if asked for and built.
+    """
+    directory = Path(tables) / f"league={league}" / f"season={season}"
+    if not (directory / "shots.parquet").exists():
+        return None
+    contexts = read_context(summaries, league, season)
+    stints = pq.read_table(directory / "stints.parquet")
+    shots = pq.read_table(directory / "shots.parquet")
+    columns = [
+        "game_id",
+        "stint",
+        "offense_side",
+        "offense_players",
+        "offense_weights",
+        "defense_players",
+        "defense_weights",
+        "possessions",
+        "points",
+    ]
+    weights = pa.list_(pa.float32())
+    stints = stints.append_column(
+        "offense_weights",
+        pa.array(
+            [[1.0] * len(f) for f in stints.column("offense_players").to_pylist()],
+            weights,
+        ),
+    ).append_column(
+        "defense_weights",
+        pa.array(
+            [[1.0] * len(f) for f in stints.column("defense_players").to_pylist()],
+            weights,
+        ),
+    )
+    tables_ = [stints.select(columns).cast(_ROW_SCHEMA)]
+    if with_estimated and (directory / "estimated.parquet").exists():
+        tables_.append(
+            pq.read_table(directory / "estimated.parquet")
+            .select(columns)
+            .cast(_ROW_SCHEMA)
+        )
+        shots = pa.concat_tables(
+            [shots, pq.read_table(directory / "estimated_shots.parquet")]
+        )
+    combined = pa.concat_tables(tables_)
+    games = combined.column("game_id").to_pylist()
+    combined = combined.filter(pa.array([game_id in contexts for game_id in games]))
+    return Rows.build(combined, contexts), shots.to_pylist()
+
+
+_ROW_SCHEMA = pa.schema(
+    [
+        ("game_id", pa.string()),
+        ("stint", pa.int16()),
+        ("offense_side", pa.string()),
+        ("offense_players", pa.list_(pa.string())),
+        ("offense_weights", pa.list_(pa.float32())),
+        ("defense_players", pa.list_(pa.string())),
+        ("defense_weights", pa.list_(pa.float32())),
+        ("possessions", pa.int16()),
+        ("points", pa.int16()),
+    ]
+)
+
+
+def priors(
+    league: str,
+    season: int,
+    target: str = "half on 3s and FTs",
+    penalty: float = 300,
+    summaries: str = "./summaries",
+    tables: str = "./stints",
+    folds: int = 5,
+):
+    """
+    Score each prior on the ratings against none, on held-out games.
+    `target` and `penalty` are what last season's ratings are fitted with,
+    for the last-season priors: by default the best of `ratings` on 2025-26.
+    Last season is fitted twice where its estimated possessions are built
+    (`estimated`): from its real lineups alone, and with them added.
+    """
+    built = _season_rows(league, season, summaries, tables)
+    assert built is not None, f"no tables for {league} {season}: make stints first"
+    rows, shot_rows = built
+    box_lines = list(read_box_lines(summaries, league, season))
+    lasts: dict[str, dict[str, tuple[float, float]]] = {}
+    last_directory = Path(tables) / f"league={league}" / f"season={season - 1}"
+    for which, with_estimated in (("real lineups", False), ("with estimated", True)):
+        if with_estimated and not (last_directory / "estimated.parquet").exists():
+            continue
+        previous = _season_rows(league, season - 1, summaries, tables, with_estimated)
+        if previous is None:
+            continue
+        last_rows, last_shots = previous
+        design = Design.build(last_rows)
+        y = TARGETS[target](targets(last_rows, last_shots, set(last_rows.game_id)))
+        b = solve(design, y, last_rows.possessions, penalties(design, player=penalty))
+        lasts[which] = player_ratings(design, b)
+        print(
+            f"last season, {which}: {len(lasts[which])} players from"
+            f" {len(set(last_rows.game_id))} games, {len(last_rows)} rows",
+            flush=True,
+        )
+    scores = compare_priors(
+        rows, shot_rows, box_lines, lasts, target=target, folds=folds
+    )
+    none = next(score for score in scores if score.target == "none")
+    print(
+        f"{len(rows)} stint rows, {len(set(rows.game_id))} games, {folds} folds, target {target}"
+    )
+    print(
+        f"{'prior':58s} {'penalty':>7s} {'margin RMSE':>11s} {'MAE':>6s} {'t vs none':>9s}"
+    )
+    shown: set[str] = set()
+    for score in scores:
+        if score.target in shown:
+            continue
+        shown.add(score.target)
+        t = "" if score is none else f"{score.paired_t(none):.1f}"
+        print(
+            f"{score.target:58s} {score.penalty:7g} {score.rmse:11.3f} {score.mae:6.3f} {t:>9s}"
+        )
+
+
+def carryover(
+    league: str,
+    season: int,
+    target: str = "half on 3s and FTs",
+    penalty: float = 300,
+    team_penalty: float = 30,
+    tune_until: str = "",
+    test_until: str = "",
+    summaries: str = "./summaries",
+    tables: str = "./stints",
+):
+    """
+    Whether last season's ratings predict this season's early games
+    (`ten_minute_version.carryover`): team carryover, last season's players
+    from its real lineups alone and with its estimated possessions, and
+    each with the team carryover. Weights are fitted on the games through
+    `tune_until` (default: the season's first two weeks, to Nov 16) and
+    scored on the rest through `test_until` (default: Dec 31).
+    """
+    tune_end = date.fromisoformat(tune_until) if tune_until else date(season, 11, 16)
+    test_end = date.fromisoformat(test_until) if test_until else date(season, 12, 31)
+    players: dict[str, dict[str, tuple[float, float]]] = {}
+    teams: dict[str, tuple[float, float]] = {}
+    for name, with_estimated in (("real lineups", False), ("with estimated", True)):
+        built = _season_rows(league, season - 1, summaries, tables, with_estimated)
+        assert built is not None, f"no tables for {league} {season - 1}"
+        last_rows, last_shots = built
+        y = TARGETS[target](targets(last_rows, last_shots, set(last_rows.game_id)))
+        design = Design.build(last_rows)
+        b = solve(design, y, last_rows.possessions, penalties(design, player=penalty))
+        players[name] = player_ratings(design, b)
+        if with_estimated:
+            team_design = Design.build(last_rows, players=False, teams=True)
+            pen = penalties(team_design, player=0, team=team_penalty)
+            tb = solve(team_design, y, last_rows.possessions, pen)
+            teams = {
+                t: (
+                    tb[team_design.team_column(i, "offense")],
+                    tb[team_design.team_column(i, "defense")],
+                )
+                for i, t in enumerate(team_design.teams)
+            }
+        print(
+            f"last season, {name}: {len(players[name])} players, {len(set(last_rows.game_id))} games",
+            flush=True,
+        )
+    built = _season_rows(league, season, summaries, tables)
+    assert built is not None, f"no tables for {league} {season}"
+    rows, _ = built
+    directory = Path(tables) / f"league={league}" / f"season={season}"
+    day = {
+        r["game_id"]: r["date"]
+        for r in pq.read_table(directory / "games.parquet").to_pylist()
+    }
+    games = sorted({g for g in rows.game_id if day[g] <= test_end})
+    terms = game_terms(rows, games, teams, players)
+    results = compare(terms, day, tune_end, variants(list(players)))
+    tuned = sum(day[g] <= tune_end for g in games)
+    print(
+        f"weights fitted on {tuned} games to {tune_end}, scored on {len(games) - tuned} to {test_end}"
+    )
+    print(f"{'from last season':34s} {'margin RMSE':>11s} {'t vs team':>9s}")
+    for result in results:
+        t = "" if result.name == "team carryover" else f"{result.t_vs_team:.1f}"
+        print(f"{result.name:34s} {result.rmse:11.3f} {t:>9s}")
 
 
 def checks(stint_table: pa.Table, game_table: pa.Table) -> dict:
@@ -332,6 +576,9 @@ if __name__ == "__main__":
             "stints": stints,
             "context": context,
             "ratings": ratings,
+            "priors": priors,
+            "estimated": estimated,
+            "carryover": carryover,
             "evaluate": evaluate,
             "fit": fit,
         }
