@@ -47,6 +47,16 @@ context:
 	uv run python build.py context $(ARGS)
 
 
+# Both, for every league and season in ./plays, with their checks.
+seasons:
+	for dir in plays/league=*/season=*; do \
+		league=$${dir#plays/league=}; league=$${league%%/*}; season=$${dir##*=}; \
+		echo "$$league $$season"; \
+		uv run python build.py stints --league $$league --season $$season && \
+		uv run python build.py context --league $$league --season $$season || exit 1; \
+	done
+
+
 # How good the estimated lineups are, on games whose real ones are known:
 #   make evaluate ARGS="--league mens --season 2025 --train 2024"
 # `--train` fits the probabilities on another season first, for an honest
@@ -62,4 +72,4 @@ fit:
 	uv run python build.py fit $(ARGS)
 
 
-.PHONY: lint check test plays summaries stints context evaluate fit
+.PHONY: lint check test plays summaries stints context seasons evaluate fit
