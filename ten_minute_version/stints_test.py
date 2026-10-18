@@ -1,4 +1,4 @@
-from .opponents import GENERIC
+from .opponents import GENERIC, Opponents
 from .stints import GAME_SCHEMA, SHOT_SCHEMA, STINT_SCHEMA, game_stints, season_tables
 from .testing import (
     AWAY,
@@ -142,7 +142,7 @@ def _against_an_outside_team():
     )
 
 
-_SEASON = {**{p: 30 for p in (*HOME, "h6")}, **{p: 3 for p in (*AWAY, "a9")}}
+_SEASON = Opponents({**{p: 30 for p in (*HOME, "h6")}, **{p: 3 for p in (*AWAY, "a9")}})
 
 
 def test_an_outside_team_plays_as_one_generic_side():

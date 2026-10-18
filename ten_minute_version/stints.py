@@ -21,14 +21,14 @@ match ESPN's final.
 """
 
 from dataclasses import dataclass
-from typing import Iterable, Mapping, NamedTuple
+from typing import Iterable, NamedTuple
 
 import pyarrow as pa
 
 from .events import Kind, classify
 from .lineups import SIDES, Floor, on_floor
 from .names import resolve_names
-from .opponents import GENERIC, generic_side
+from .opponents import GENERIC, Opponents
 from .plays import Game
 from .possessions import Possession, Shot, possessions
 
@@ -155,18 +155,17 @@ class SeasonTables(NamedTuple):
     shots: pa.Table
 
 
-def game_stints(game: Game, appearances: Mapping[str, int] | None = None) -> GameStints:
+def game_stints(game: Game, opponents: Opponents | None = None) -> GameStints:
     """
-    A game's stint rows and its report row. `appearances` is how many of the
-    season's games each player appears in (`opponents.appearances`); without
-    it no side is played as generic.
+    A game's stint rows and its report row. `opponents` says which side of
+    the season's games is generic; without it no side is.
     """
     game = resolve_names(game)
     kinds = [classify(play) for play in game.plays]
     report = _report(game)
     # Said for every game, stints or not: the estimated lineups play the
     # same side as generic, and it's checked against ESPN's own D1 flag.
-    generic = generic_side(game, appearances) if appearances is not None else None
+    generic = opponents.generic_side(game) if opponents is not None else None
     report["generic_side"] = generic
     if not any(kind in (Kind.SUB_IN, Kind.SUB_OUT) for kind in kinds):
         return GameStints([], report, [])
@@ -189,18 +188,18 @@ def game_stints(game: Game, appearances: Mapping[str, int] | None = None) -> Gam
 
 
 def season_tables(
-    games: Iterable[Game], appearances: Mapping[str, int] | None = None
+    games: Iterable[Game], opponents: Opponents | None = None
 ) -> SeasonTables:
     """
-    The stint, game, player and shot tables for a run of games.
-    `appearances` is as for `game_stints`, counted over the same season.
+    The stint, game, player and shot tables for a run of games, with
+    `opponents` as for `game_stints`.
     """
     rows: list[dict] = []
     reports: list[dict] = []
     shots: list[dict] = []
     names: dict[tuple[str, int, str], str | None] = {}
     for game in games:
-        built = game_stints(game, appearances)
+        built = game_stints(game, opponents)
         rows += built.rows
         reports.append(built.report)
         shots += built.shots

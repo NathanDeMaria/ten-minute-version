@@ -53,13 +53,30 @@ def test_the_teams_and_where_come_from_the_header():
 
 
 def test_a_team_outside_division_one_says_so():
-    outside = {"id": "99", "parent": {"id": "51", "name": "NCAA Division II"}}
+    outside = {
+        "id": "51",
+        "isConference": False,
+        "parent": {"id": "52", "name": "NCAA Basketball"},
+        "slug": "non-ncaa-division-i",
+    }
     context = parse_context("g1", _summary(away_groups=outside))
     assert context is not None
     assert not context.away.division_one
     # and a team with no groups at all isn't D1 either
     no_groups = parse_context("g1", _summary())
     assert no_groups is not None and not no_groups.away.division_one
+
+
+def test_a_team_in_a_d1_conferences_division_is_d1():
+    east = {
+        "id": "35",
+        "isConference": False,
+        "parent": {"id": "14", "name": "Mid-American Conference"},
+        "slug": "mid-american---east",
+    }
+    context = parse_context("g1", _summary(away_groups=east))
+    assert context is not None and context.away.division_one
+    assert context.away.conference == "mid-american---east"
 
 
 def test_a_summary_without_both_teams_is_skipped():

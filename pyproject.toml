@@ -39,3 +39,8 @@ select = ["I", "F"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["ten_minute_version"]
+
+[tool.pytest.ini_options]
+# Not into the local data (`make plays`, `make summaries`): walking every
+# season's summaries takes pytest 15 s. The rest are pytest's own defaults.
+norecursedirs = ["plays", "stints", "summaries", ".*", "build", "dist", "*.egg", "venv"]

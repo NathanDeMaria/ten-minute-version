@@ -11,6 +11,12 @@ where `root` is endgame's `summaries/ncaabb` prefix or a local copy of it
 header says which teams those were, whether the game was at a neutral site,
 whether it was a conference game, and each team's conference -- including
 whether that conference is in Division I. Only the header is read.
+
+The conference is the one ESPN files the team under now, not the one it was
+in that season: Lindenwood shows in a D1 conference in 2011-12, when it was
+in Division II. So `division_one` is right for the current season and not
+always before it; `opponents` says which teams were from outside D1 by
+their schedules instead.
 """
 
 import gzip
@@ -21,15 +27,18 @@ from typing import Any, Mapping
 
 import pyarrow as pa
 
-# ESPN's group id for NCAA Division I, the parent of every D1 conference.
+# ESPN's group id for NCAA Division I, the parent of every D1 conference;
+# and for NCAA basketball, the parent of the group for teams outside D1.
 _DIVISION_ONE = "50"
+_NCAA = "52"
 
 
 @dataclass(frozen=True)
 class Team:
     team_id: str
     name: str | None
-    # ESPN's conference id and slug, and whether it's a D1 conference.
+    # ESPN's conference id and slug (or the conference's division, for
+    # one that had them), and whether it's in Division I.
     conference_id: str | None
     conference: str | None
     division_one: bool
@@ -122,11 +131,15 @@ def _team(team: Mapping[str, Any]) -> Team | None:
     if not team.get("id"):
         return None
     groups = team.get("groups") or {}
-    parent = groups.get("parent") or {}
+    parent = str((groups.get("parent") or {}).get("id"))
+    # A conference with divisions (the MAC to 2019-20, the OVC to 2016-17,
+    # the pods of 2020-21) files its teams under the division, whose parent
+    # is the conference rather than D1.
+    division = groups.get("isConference") is False and parent not in ("None", _NCAA)
     return Team(
         team_id=str(team["id"]),
         name=team.get("displayName"),
         conference_id=str(groups["id"]) if groups.get("id") else None,
         conference=groups.get("slug"),
-        division_one=str(parent.get("id")) == _DIVISION_ONE,
+        division_one=parent == _DIVISION_ONE or division,
     )

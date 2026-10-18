@@ -18,6 +18,7 @@ in `ten_minute_version/releases/`.
 """
 
 import json
+from collections import Counter
 from pathlib import Path
 
 import pyarrow as pa
@@ -35,18 +36,31 @@ from ten_minute_version.evaluate import (
     fit_on_floor,
     known_games,
 )
-from ten_minute_version.opponents import appearances
+from ten_minute_version.lineups import SIDES
+from ten_minute_version.opponents import (
+    Opponents,
+    appearances,
+    outside_side,
+    schedules,
+)
 from ten_minute_version.plays import read_games
 from ten_minute_version.probabilities import FEATURES, OnFloorModel
 from ten_minute_version.stints import season_tables
 
 
-def stints(league: str, season: int, root: str = "./plays", out: str = "./stints"):
+def stints(
+    league: str,
+    season: int,
+    root: str = "./plays",
+    summaries: str = "./summaries",
+    out: str = "./stints",
+):
     # Read twice: once to count each player's games, which says which sides
-    # are teams from outside Division I, then to build.
+    # are teams from outside Division I where a game has no summary, then to
+    # build.
     seen = appearances(read_games(root, league, season))
-    games = read_games(root, league, season)
-    tables = season_tables(games, seen)
+    opponents = Opponents(seen, read_context(summaries, league, season))
+    tables = season_tables(read_games(root, league, season), opponents)
     directory = Path(out) / f"league={league}" / f"season={season}"
     directory.mkdir(parents=True, exist_ok=True)
     for name, table in tables._asdict().items():
@@ -58,11 +72,10 @@ def context(
     league: str, season: int, summaries: str = "./summaries", out: str = "./stints"
 ):
     """
-    Write who played each game and where (`context.parquet`) next to the
-    season's stint tables, and check it against them: how many of the games
-    it covers, and whether the side played as generic is the one ESPN says
-    isn't in Division I. A season with summaries but no plays (before
-    2013-14) gets the table and no check.
+    Write who played each game and where (`context.parquet`) where the
+    season's stint tables go, and check the side `opponents` plays as generic
+    against ESPN's own Division I flag, with the teams they disagree on --
+    mostly ones ESPN files under the D1 conference they're in now.
     """
     contexts = read_context(summaries, league, season)
     directory = Path(out) / f"league={league}" / f"season={season}"
@@ -70,35 +83,41 @@ def context(
     pq.write_table(
         context_table(contexts), directory / "context.parquet", compression="zstd"
     )
-    stinted = directory / "games.parquet"
-    games = pq.read_table(stinted).to_pylist() if stinted.exists() else []
-    agreement: dict[str, int] = {}
-    for game in games:
-        found = contexts.get(game["game_id"])
-        if found is None:
-            continue
-        outside = [
-            side for side in ("home", "away") if not found.team(side).division_one
-        ]
-        called = game["generic_side"]
+    found = schedules(contexts.values())
+    agreement: Counter[str] = Counter()
+    disputed: Counter[str] = Counter()
+    for game in contexts.values():
+        outside = [side for side in SIDES if not game.team(side).division_one]
+        called = outside_side(game, found)
         if called is None and not outside:
             verdict = "both D1, none generic"
         elif called is not None and outside == [called]:
             verdict = "outside team generic"
         elif called is None:
-            verdict = "outside team kept as players"
+            verdict = "ESPN's outside team kept as players"
         else:
-            verdict = "D1 team generic"
-        agreement[verdict] = agreement.get(verdict, 0) + 1
+            verdict = "ESPN's D1 team generic"
+        agreement[verdict] += 1
+        for side in outside if called is None else [called]:
+            if verdict.startswith("ESPN"):
+                team = game.team(side)
+                schedule = found[team.team_id]
+                disputed[
+                    f"{team.name} ({schedule.games} games,"
+                    f" {schedule.conference_games} in conference)"
+                ] += 1
+    stinted = directory / "games.parquet"
+    games = pq.read_table(stinted).to_pylist() if stinted.exists() else []
     print(
         json.dumps(
             {
                 "summaries": len(contexts),
-                "games": len(games),
+                "games_with_plays": len(games),
                 "with_a_summary": sum(game["game_id"] in contexts for game in games),
                 "neutral_site": sum(c.neutral_site for c in contexts.values()),
                 "conference_game": sum(c.conference_game for c in contexts.values()),
-                "generic_side_vs_espn": agreement,
+                "generic_side_vs_espn": dict(agreement),
+                "disputed": dict(disputed.most_common()),
             },
             indent=2,
         )

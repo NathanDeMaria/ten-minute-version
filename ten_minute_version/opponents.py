@@ -5,33 +5,51 @@ generic team rather than as its players.
 ESPN's schedule is Division I's, and early each season a D1 team plays a
 few teams from outside it -- NAIA, Division II and III. Most of their
 players have no ESPN record, so their plays carry no athlete id and their
-side of the floor can't be followed. Those that do have records turn up in
-only the handful of games their team plays against D1.
+side of the floor can't be followed.
 
-That second fact is what tells them apart. A play with no id isn't enough:
-D1 teams have players ESPN hasn't linked too -- all 26 mens sides with over
-5% of their shots unidentified in 2024-25 were D1, as were UCLA's women in
-four 2025-26 games -- and treating those teams as generic would throw away
-the players who are known. But a D1 team's players appear all season. So a side is generic when
-its typical player -- the median over the players it used in the game --
-has appeared in under 40% as many of the season's games as the other side's
-typical player, or when it has no identified player and the other side
-does.
+**By the team's schedule**, where the game has a summary (`context`). The
+summaries hold every game a D1 team played, so they say how many of the
+season's games each team was in: a D1 team ~30, a team from outside at most
+13 (Virginia Lynchburg's men in 2024-25). A side is generic when its team
+played under 60% as many of the season's games as the other side's team,
+and no conference game. The conference game is for 2020-21, when COVID cut
+some D1 seasons to a handful of games (Duke's women played four) that were
+still in their conference.
 
-Over 2025-26 that marks 535 mens and 395 womens sides, every one a team
-outside D1, and no D1 team. The nearest outside team sits at 0.375 (College
-of Biblical Studies, who play enough D1 games, and whose players are all
-known, to stay real players); the nearest D1 team at 0.47 (Bellarmine's
-women).
+ESPN's own Division I flag can't be the rule: a summary files each team
+under the conference it's in now, not then, so teams that have since moved
+up -- Lindenwood, Utah Tech, Queens, Mercyhurst -- show as D1 in seasons
+they came as Division II opponents; and Texas A&M-Corpus Christi's women
+have no conference at all in 2022-23. Over 2013-14 to 2025-26 (149,110
+games, 9,680 generic sides) the rule and ESPN's flag disagree on 95 games:
+about half where the flag is wrong, a third in 2020-21 (Carver College's
+19 games kept as players, Chicago State's and Howard's men played as
+generic), and 14 where ESPN calls a game against a team from outside a
+conference game. Before 2013-14 ESPN does that often enough to keep ~150 a
+season as players, but those seasons have no plays.
 
-It's a ratio rather than a count of games so it holds on part of a season:
-on opening day, when everyone has played once, no side is generic, and an
-outside team's possessions are left out as they were before.
+**By the players' appearances**, where it has none -- what the plays alone
+can say. A side is generic when its typical player, the median over the
+players it used in the game, appeared in under 40% as many of the season's
+games as the other side's, or when it has no identified player and the
+other side does. A play with no id isn't enough: D1 teams have players ESPN
+hasn't linked too (all 26 mens sides with over 5% of their shots
+unidentified in 2024-25 were D1). It's second because it counts games with
+plays, and those are missing for some teams far more than others: it plays
+40-51 D1 sides a season as generic in 2013-14 to 2015-16, and before
+2019-20, when only a quarter of womens games have plays, two in five of
+them.
+
+Both are ratios rather than counts of games so they hold on part of a
+season: on opening day, when everyone has played once, no side is generic,
+and an outside team's possessions are left out as they were before.
 """
 
 from collections import Counter
+from dataclasses import dataclass
 from typing import Iterable, Mapping
 
+from .context import GameContext
 from .events import other
 from .lineups import SIDES
 from .names import resolve_names
@@ -40,8 +58,64 @@ from .plays import Game
 # The player id that stands in for a generic side's five.
 GENERIC = "generic"
 
-# A side is generic below this share of the other side's typical games.
+# A side is generic below this share of the other side's team's games...
+TEAM_CUTOFF = 0.6
+# ...or, without a summary, of the other side's typical player's.
 CUTOFF = 0.4
+
+
+@dataclass(frozen=True)
+class Schedule:
+    """A team's games in a season, from its summaries."""
+
+    games: int = 0
+    conference_games: int = 0
+
+
+class Opponents:
+    """
+    Which side of each of a season's games is generic: by its team's
+    schedule (`contexts`, the season's summaries) where the game has a
+    summary, by its players' `appearances` where it doesn't.
+    """
+
+    def __init__(
+        self,
+        appearances: Mapping[str, int],
+        contexts: Mapping[str, GameContext] | None = None,
+    ):
+        self.appearances = appearances
+        self.contexts = contexts or {}
+        self.schedules = schedules(self.contexts.values())
+
+    def generic_side(self, game: Game) -> str | None:
+        """`game` should have its names resolved, as `appearances` counted it."""
+        context = self.contexts.get(game.game_id)
+        if context is None:
+            return generic_side(game, self.appearances)
+        return outside_side(context, self.schedules)
+
+
+def schedules(contexts: Iterable[GameContext]) -> dict[str, Schedule]:
+    """Each team's games and conference games in `contexts`."""
+    games: Counter[str] = Counter()
+    conference: Counter[str] = Counter()
+    for context in contexts:
+        for side in SIDES:
+            team = context.team(side).team_id
+            games[team] += 1
+            conference[team] += context.conference_game
+    return {team: Schedule(games[team], conference[team]) for team in games}
+
+
+def outside_side(context: GameContext, schedules: Mapping[str, Schedule]) -> str | None:
+    """The side of a game whose team's schedule says it's from outside D1."""
+    for side in SIDES:
+        mine = schedules.get(context.team(side).team_id, Schedule())
+        theirs = schedules.get(context.team(other(side)).team_id, Schedule())
+        if not mine.conference_games and mine.games < TEAM_CUTOFF * theirs.games:
+            return side
+    return None
 
 
 def appearances(games: Iterable[Game]) -> Counter[str]:
@@ -55,8 +129,9 @@ def appearances(games: Iterable[Game]) -> Counter[str]:
 
 def generic_side(game: Game, appearances: Mapping[str, int]) -> str | None:
     """
-    The side of `game` to play as one generic team, if either. `game` should
-    have its names resolved (`resolve_names`), as `appearances` counted it.
+    The side of `game` its players' appearances say is from outside D1, if
+    either. `game` should have its names resolved (`resolve_names`), as
+    `appearances` counted it.
     """
     players = _players(game)
     typical = {
