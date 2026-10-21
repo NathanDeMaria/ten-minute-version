@@ -219,6 +219,68 @@ def ratings(
         )
 
 
+def season_ratings(
+    league: str,
+    first: int = 2013,
+    last: int = 2025,
+    target: str = "half on 3s and FTs",
+    player_penalty: float = 1000,
+    team_penalty: float = 30,
+    top: int = 15,
+    min_possessions: int = 1000,
+    summaries: str = "./summaries",
+    tables: str = "./stints",
+):
+    """
+    Every season's players rated from all of its games -- real lineups where
+    the feed has them, estimated possessions where it doesn't -- with the
+    team columns `ratings` writes, to `season_ratings.parquet` next to each
+    season's tables; and each season's best by total, among players on the
+    floor for at least `min_possessions` possessions at each end.
+    """
+    for season in range(first, last + 1):
+        built = _season_rows(league, season, summaries, tables, with_estimated=True)
+        if built is None:
+            print(f"{league} {season}: no tables")
+            continue
+        rows, shot_rows = built
+        y = TARGETS[target](targets(rows, shot_rows, set(rows.game_id)))
+        design = Design.build(rows, teams=True)
+        pen = penalties(design, player=player_penalty, team=team_penalty)
+        b = solve(design, y, rows.possessions, pen)
+        directory = Path(tables) / f"league={league}" / f"season={season}"
+        names = {
+            r["athlete_id"]: r["athlete_name"]
+            for r in pq.read_table(directory / "players.parquet").to_pylist()
+        }
+        contexts = read_context(summaries, league, season)
+        team_names = {
+            c.team(side).team_id: c.team(side).name
+            for c in contexts.values()
+            for side in ("home", "away")
+        }
+        table = ratings_table(league, season, rows, design, b, names, team_names)
+        pq.write_table(table, directory / "season_ratings.parquet", compression="zstd")
+        played = [
+            r
+            for r in table.to_pylist()
+            if min(r["offense_possessions"], r["defense_possessions"])
+            >= min_possessions
+        ]
+        print(
+            f"\n{league} {season}-{(season + 1) % 100:02d}: {len(set(rows.game_id))}"
+            f" games, {len(played)} players with {min_possessions}+ possessions",
+            flush=True,
+        )
+        for r in sorted(played, key=lambda r: -r["total"])[:top]:
+            print(
+                f"  {r['athlete_name'] or r['athlete_id']:24s} {r['team'] or '':28s}"
+                f" off {r['offense']:+5.1f} def {r['defense']:+5.1f}"
+                f" total {r['total']:+5.1f}",
+                flush=True,
+            )
+
+
 def estimated(
     league: str,
     season: int,
@@ -664,6 +726,7 @@ if __name__ == "__main__":
             "stints": stints,
             "context": context,
             "ratings": ratings,
+            "season_ratings": season_ratings,
             "priors": priors,
             "estimated": estimated,
             "carryover": carryover,
