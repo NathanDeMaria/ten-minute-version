@@ -33,6 +33,14 @@ summaries:
 	aws s3 sync --only-show-errors s3://${BUCKET}/summaries/ncaabb ./summaries
 
 
+# so-high-school's college basketball recruits -- ESPN's top 100 of each high
+# school class, matched to athlete ids -- which `recruit-model` and
+# `carryovers` read: {league}/recruits.csv.
+recruits:
+	aws s3 sync --only-show-errors --exclude "*/raw/*" --exclude "*/players/*" \
+		s3://${BUCKET}/so-high-school/ncaabb ./recruits
+
+
 # One season's possession tables, and the checks that say how far to trust
 # them: `make stints ARGS="--league mens --season 2025"`. Writes under
 # ./stints; `--root` and `--out` move either end.
@@ -99,6 +107,12 @@ season-ratings:
 box-model:
 	uv run python build.py box_model $(ARGS)
 
+# What a newcomer's recruiting rank says of his first season, learned from
+# every season's season_ratings (run season-ratings first) -- commit what
+# this changes: make recruit-model ARGS="--league mens"
+recruit-model:
+	uv run python build.py recruit_model $(ARGS)
+
 
 # How good the estimated lineups are, on games whose real ones are known:
 #   make evaluate ARGS="--league mens --season 2025 --train 2024"
@@ -115,4 +129,4 @@ fit:
 	uv run python build.py fit $(ARGS)
 
 
-.PHONY: lint check test plays summaries stints context seasons ratings estimated priors carryover carryovers season-ratings box-model evaluate fit
+.PHONY: lint check test plays summaries stints context seasons ratings estimated priors carryover carryovers season-ratings box-model recruits recruit-model evaluate fit

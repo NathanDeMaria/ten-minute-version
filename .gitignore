@@ -13,3 +13,5 @@ plays/
 stints/
 # ...and of the game summaries endgame stores (`make summaries`).
 summaries/
+# ...and of so-high-school's recruits (`make recruits`): ESPN's, not to commit.
+recruits/
