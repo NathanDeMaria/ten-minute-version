@@ -121,6 +121,32 @@ preseasons:
 	uv run python build.py preseasons $(ARGS)
 
 
+# Chained ratings: each player's rating carried from season to season with
+# how sure it is, tested week by week (see ten_minute_version/chain.py).
+# After season-ratings, for a league:
+#   make chain-weeks ARGS="--league mens"      # cache each season's weeks
+#   make newcomer-fits ARGS="--league mens"    # newcomers, nearly unshrunk
+#   make newcomer-prior ARGS="--league mens"   # their prior by rank: commit what this changes
+#   make chain ARGS="--league mens --variant baseline"
+#   make chain ARGS="--league mens"
+# and whether the posterior variances are right, on a season's two halves:
+#   make calibrate ARGS="--league mens --season 2025 --side defense"
+chain-weeks:
+	uv run python build.py chain_weeks $(ARGS)
+
+newcomer-fits:
+	uv run python build.py newcomer_fits $(ARGS)
+
+newcomer-prior:
+	uv run python build.py newcomer_prior $(ARGS)
+
+chain:
+	uv run python build.py chain $(ARGS)
+
+calibrate:
+	uv run python build.py calibrate $(ARGS)
+
+
 # How good the estimated lineups are, on games whose real ones are known:
 #   make evaluate ARGS="--league mens --season 2025 --train 2024"
 # `--train` fits the probabilities on another season first, for an honest
@@ -136,4 +162,4 @@ fit:
 	uv run python build.py fit $(ARGS)
 
 
-.PHONY: lint check test plays summaries stints context seasons ratings estimated priors carryover carryovers season-ratings box-model recruits recruit-model preseasons evaluate fit
+.PHONY: lint check test plays summaries stints context seasons ratings estimated priors carryover carryovers season-ratings box-model recruits recruit-model preseasons chain-weeks newcomer-fits newcomer-prior chain calibrate evaluate fit
