@@ -415,3 +415,50 @@ from few games and its newcomers matter more.
 
 Only the top 100 of a class are ranked, about 8% of a season's D1 players, but
 they're the newcomers who matter most.
+
+## Before the season: rosters and projected minutes
+
+Every test above knows who played: last season's ratings are scored on this season's
+real lineups. Before a season that isn't known. `preseason` rates a team from only
+what is: its roster, last season's ratings (`season_ratings`), recruiting ranks
+(`recruiting`), and how much each player played last season (`make seasons` now
+writes each season's `minutes.parquet`). A team's projected offense and defense are
+its players' ratings, each weighted by a projected share of its minutes; a newcomer
+is at what his recruiting rank says, and a team from outside Division I at last
+season's generic rating.
+
+`preseason.MinutesModel` projects each player's share of his team's minutes from his
+share last season on the same team or another, whether and how well he was rated, his
+recruiting rank, whether he's new, and how many seasons he's played: a player keeps
+about 60% of his share if he stays and about 45% if he transfers, and a top recruit
+starts with more. It only correlates about 0.55 with the shares that happen, but a
+team's rating barely notices: its misses are mostly on the bench.
+
+`make preseasons ARGS="--league mens"` predicts each season's games to Dec 31 from
+last season's team ratings, from the projected roster, and from both, with the minutes
+and recruit models learned on every season but the one predicted. The roster is
+everyone who played for the team that season (as rosters are published before it);
+"early roster" counts only who'd played by the end of the first two weeks, so that a
+player hurt or redshirting all season, or one who joined late, can't help:
+
+| season | mens: teams | roster | both | early roster | womens: teams | roster | both | early roster |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2014-15 | 13.48 | 12.57 | 12.43 | 12.43 | 15.98 | 15.02 | 15.01 | 15.44 |
+| 2015-16 | 13.61 | 12.49 | 12.41 | 12.43 | 15.64 | 14.67 | 15.02 | 15.04 |
+| 2016-17 | 13.49 | 12.51 | 12.37 | 12.39 | 15.27 | 14.78 | 14.67 | 14.34 |
+| 2017-18 | 14.38 | 13.00 | 13.03 | 13.07 | 16.05 | 15.27 | 15.23 | 15.25 |
+| 2018-19 | 14.20 | 13.61 | 13.22 | 13.24 | 15.93 | 15.32 | 15.31 | 15.31 |
+| 2019-20 | 15.07 | 13.35 | 13.35 | 13.34 | 18.47 | 17.37 | 17.39 | 17.46 |
+| 2020-21 | 14.24 | 15.00 | 13.62 | 13.70 | 15.82 | 14.84 | 14.54 | 15.22 |
+| 2021-22 | 16.87 | 13.52 | 13.49 | 13.56 | 18.34 | 14.81 | 14.58 | 14.63 |
+| 2022-23 | 14.60 | 12.93 | 12.80 | 12.85 | 16.34 | 14.76 | 14.48 | 14.49 |
+| 2023-24 | 14.85 | 13.66 | 13.49 | 13.52 | 16.87 | 14.82 | 14.61 | 14.62 |
+| 2024-25 | 14.53 | 13.49 | 13.12 | 13.11 | 17.10 | 14.80 | 14.60 | 14.61 |
+| 2025-26 | 15.03 | 14.09 | 13.52 | 13.51 | 18.25 | 15.49 | 15.20 | 15.20 |
+| all | 14.58 | 13.31 | **13.07** | **13.09** | 17.18 | 15.26 | **15.09** | **15.14** |
+
+A season's teams are known about a point and a half better (mens) and two points
+(womens) before it starts than last season's team ratings say, and three to four the
+season after COVID. That's about what last season's ratings on this season's real
+lineups get (13.20 and 15.20 above): knowing the roster and roughly how minutes go
+is nearly as good as knowing who actually played.

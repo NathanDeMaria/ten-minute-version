@@ -1,11 +1,16 @@
 """
 Each player's box score line in each game, from the game summaries
-`context` reads -- for the box-score prior on the ratings (`priors`).
+`context` reads -- for the box-score prior on the ratings (`priors`) -- and
+each player's minutes for each team over a season, for the preseason
+projection (`preseason`).
 """
 
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Any, Iterator, Mapping
+
+import pyarrow as pa
 
 from .context import read_summaries
 
@@ -71,6 +76,64 @@ def parse_box_lines(game_id: str, summary: Mapping[str, Any]) -> Iterator[BoxLin
                     position=(athlete.get("position") or {}).get("abbreviation"),
                     stats=stats,
                 )
+
+
+MINUTES_SCHEMA = pa.schema(
+    [
+        pa.field("athlete_id", pa.string(), nullable=False),
+        pa.field("team_id", pa.string(), nullable=False),
+        pa.field("minutes", pa.float64(), nullable=False),
+        pa.field("games", pa.int32(), nullable=False),
+        pa.field("starts", pa.int32(), nullable=False),
+        # his share of the team's minutes, times five: a team's add up to 5
+        pa.field("share", pa.float64(), nullable=False),
+        # the first game he played for the team; None if no summary dates it
+        pa.field("first_date", pa.date32()),
+    ]
+)
+
+
+def season_minutes(root: str | Path, league: str, season: int) -> pa.Table:
+    """
+    Each player's minutes for each team he played for in a season, from the
+    box scores: one row per player and team (`MINUTES_SCHEMA`), for the
+    preseason projection (`preseason`).
+    """
+    totals: dict[tuple[str, str], list] = {}
+    team_minutes: dict[str, float] = {}
+    for game_id, summary in read_summaries(root, league, season):
+        day = _date(summary)
+        for line in parse_box_lines(game_id, summary):
+            minutes = max(line.stats["minutes"], 0.0)
+            seen = totals.setdefault((line.athlete_id, line.team_id), [0.0, 0, 0, day])
+            seen[0] += minutes
+            seen[1] += 1
+            seen[2] += line.starter
+            if day is not None and (seen[3] is None or day < seen[3]):
+                seen[3] = day
+            team_minutes[line.team_id] = team_minutes.get(line.team_id, 0.0) + minutes
+    rows = [
+        {
+            "athlete_id": athlete,
+            "team_id": team,
+            "minutes": minutes,
+            "games": games,
+            "starts": starts,
+            "share": 5 * minutes / team_minutes[team] if team_minutes[team] else 0.0,
+            "first_date": first,
+        }
+        for (athlete, team), (minutes, games, starts, first) in sorted(totals.items())
+    ]
+    return pa.Table.from_pylist(rows, schema=MINUTES_SCHEMA)
+
+
+def _date(summary: Mapping[str, Any]) -> date | None:
+    competitions = (summary.get("header") or {}).get("competitions") or [{}]
+    text = competitions[0].get("date") or ""
+    try:
+        return date.fromisoformat(text[:10])
+    except ValueError:
+        return None
 
 
 def _number(text: str) -> float:
