@@ -19,6 +19,7 @@ in `ten_minute_version/releases/`.
 
 import json
 from collections import Counter
+from collections.abc import Mapping
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -68,6 +69,15 @@ from ten_minute_version.ratings import (
     ratings_table,
     solve,
     targets,
+)
+from ten_minute_version.recruiting import (
+    Recruit,
+    RecruitModel,
+    newcomers,
+    read_recruits,
+)
+from ten_minute_version.recruiting import (
+    features as recruit_features,
 )
 from ten_minute_version.stints import season_tables
 
@@ -575,6 +585,57 @@ def carryover(
         print(f"{result.name:34s} {result.rmse:11.3f} {t:>9s}")
 
 
+def _rating_tables(league: str, tables: str) -> dict[int, list[dict]]:
+    """Every season's `season_ratings.parquet` rows, by season."""
+    found = {}
+    for path in sorted(
+        Path(tables).glob(f"league={league}/season=*/season_ratings.parquet")
+    ):
+        found[int(path.parent.name.split("=")[1])] = pq.read_table(path).to_pylist()
+    return found
+
+
+def _recruit_model(
+    league: str,
+    ratings: Mapping[int, list[dict]],
+    recruits: Mapping[str, Recruit],
+    leave_out: int | None = None,
+) -> RecruitModel:
+    """`RecruitModel` learned on every season's newcomers but `leave_out`'s."""
+    found = [n for n in newcomers(ratings) if n.season != leave_out]
+    return RecruitModel.learn(league, found, recruits)
+
+
+def recruit_model(league: str, recruits: str = "./recruits", tables: str = "./stints"):
+    """
+    Learn what a newcomer's recruiting rank says of his first season
+    (`recruiting.RecruitModel`) from every season's `season_ratings` (run
+    that first), and write it to `releases/`: commit what this changes.
+    """
+    ratings = _rating_tables(league, tables)
+    found = read_recruits(recruits, league)
+    model = _recruit_model(league, ratings, found)
+    path = model.save(
+        seasons=sorted(ratings),
+        newcomers=len(newcomers(ratings)),
+        ranked=sum(
+            recruit_features(found.get(n.athlete_id), n.season)[0] == 1
+            for n in newcomers(ratings)
+        ),
+    )
+    print(f"wrote {path}")
+    for label, recruit in (
+        ("unranked", None),
+        ("#100", Recruit("", 0, 100, 0)),
+        ("#50", Recruit("", 0, 50, 0)),
+        ("#1", Recruit("", 0, 1, 0)),
+    ):
+        o, d = model.rating(recruit, 0)
+        print(
+            f"    {label:9s} off {100 * o:+5.1f} def {100 * d:+5.1f} total {100 * (o + d):+5.1f}"
+        )
+
+
 def carryovers(
     league: str,
     first: int = 2014,
@@ -583,23 +644,34 @@ def carryovers(
     penalty: float = 300,
     team_penalty: float = 30,
     box_prior: bool = True,
+    recruit_prior: bool = True,
+    recruits: str = "./recruits",
     summaries: str = "./summaries",
     tables: str = "./stints",
 ):
     """
     `carryover` for every season from `first` to `last`, each from the one
     before, a line a season -- and over all of them, every season's scored
-    games together. Three ways to predict: last season's teams, teams and
-    players fitted without a prior, and teams and players as
-    `season_ratings` writes them (with the box-score prior, unless
-    `box_prior` is off). Each `t` is against the column before it.
+    games together. Four ways to predict: last season's teams, teams and
+    players fitted without a prior, teams and players as `season_ratings`
+    writes them (with the box-score prior, unless `box_prior` is off), and
+    those with each ranked newcomer at what his recruiting rank says
+    (unless `recruit_prior` is off; learned from every season but the one
+    predicted, so run `season_ratings` first). Each `t` is against the
+    column before it.
     """
     box = BoxModel.load(league) if box_prior else None
     names = ["team carryover", "team + players, with estimated"]
     if box is not None:
         names.append("team + players, box prior")
+    found: dict[str, Recruit] = {}
+    ratings: dict[int, list[dict]] = {}
+    if box is not None and recruit_prior:
+        names.append("team + players, box prior + recruits")
+        found = read_recruits(recruits, league)
+        ratings = _rating_tables(league, tables)
     pooled: dict[str, list[np.ndarray]] = {name: [] for name in names}
-    labels = ("teams", "+ players", "+ box prior")[: len(names)]
+    labels = ("teams", "+ players", "+ box prior", "+ recruits")[: len(names)]
     print(
         f"{'season':>6s} {'games':>6s} "
         + " ".join(
@@ -632,6 +704,12 @@ def carryovers(
             tables,
             quiet=True,
             box=box,
+            recruits=found,
+            recruit_model=(
+                _recruit_model(league, ratings, found, leave_out=season)
+                if found
+                else None
+            ),
         )
         by = {r.name: r for r in results}
         for name in names:
@@ -656,6 +734,8 @@ def _carryover(
     quiet: bool = False,
     box: BoxModel | None = None,
     anchored_penalty: float = 1000,
+    recruits: Mapping[str, Recruit] | None = None,
+    recruit_model: RecruitModel | None = None,
 ) -> tuple[list[Result], int, int]:
     """`carryover`'s results, and how many games it tuned and scored on."""
     test_end = date.fromisoformat(test_until) if test_until else date(season, 12, 31)
@@ -720,6 +800,18 @@ def _carryover(
         for r in pq.read_table(directory / "games.parquet").to_pylist()
     }
     games = sorted({g for g in rows.game_id if day[g] <= test_end})
+    if recruit_model is not None and "box prior" in players:
+        # This season's ranked newcomers, at what their rank says; the rest
+        # stay newcomers, counted alike.
+        rated = players["box prior"]
+        ranked = {
+            p: recruit_model.rating(recruits.get(p) if recruits else None, season)
+            for five in (*rows.offense, *rows.defense)
+            for p in five
+            if p not in rated
+            and recruit_features((recruits or {}).get(p), season)[0] == 1
+        }
+        players["box prior + recruits"] = {**rated, **ranked}
     first = min(day[g] for g in games)
     tune_end = (
         date.fromisoformat(tune_until) if tune_until else first + timedelta(days=13)
@@ -859,6 +951,7 @@ if __name__ == "__main__":
             "ratings": ratings,
             "season_ratings": season_ratings,
             "box_model": box_model,
+            "recruit_model": recruit_model,
             "priors": priors,
             "estimated": estimated,
             "carryover": carryover,

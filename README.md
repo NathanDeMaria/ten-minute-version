@@ -367,3 +367,51 @@ at each end, by total), with the box prior and without:
 
 Zion Williamson, Zach Edey (2023-24) and five of the women's are first; Buddy Hield
 (108th) and Cooper Flagg (13th) are where it still misses.
+
+## Recruits: what a newcomer is worth before he's played
+
+A player last season didn't rate has nothing to carry over: the test above counts
+every newcomer alike, a top-five recruit and a walk-on both. But a freshman's high
+school rank says a lot about his first season. In `season_ratings`, top-25 recruits
+come in about 5 points per 100 above unranked freshmen for mens and 7 for womens, and
+recruits ranked 26-100 about 3 and 4.
+
+The recruits are ESPN's top 100 of each high school class (boys from 2010, girls from
+2009), matched to ESPN athlete ids by
+[so-high-school](https://github.com/NathanDeMaria/so-high-school) and copied down by
+`make recruits` (they're ESPN's, so not in git). `recruiting.RecruitModel` regresses
+every newcomer's first-season rating on whether he was ranked (in this class or last)
+and how high, weighted by his possessions (`make recruit-model`, after
+`make season-ratings`, written to `releases/recruit-prior-{league}.json`):
+
+| first-season rating per 100 | unranked | #100 | #50 | #1 |
+| --- | --- | --- | --- | --- |
+| mens | +0.2 | +1.9 | +3.7 | +5.5 |
+| womens | +0.2 | +2.0 | +5.0 | +7.9 |
+
+In the carryover test each ranked newcomer then starts at that, learned from every
+season but the one predicted; the unranked are still counted alike:
+
+| season | mens: box prior | + recruits | t | womens: box prior | + recruits | t |
+| --- | --- | --- | --- | --- | --- | --- |
+| 2014-15 | 12.64 | 12.56 | -2.1 | 16.01 | 15.45 | -3.5 |
+| 2015-16 | 12.57 | 12.50 | -1.6 | 15.34 | 15.09 | -2.1 |
+| 2016-17 | 12.64 | 12.51 | -3.4 | 15.16 | 14.43 | -3.7 |
+| 2017-18 | 13.26 | 13.13 | -4.2 | 15.84 | 15.62 | -1.7 |
+| 2018-19 | 13.43 | 13.35 | -1.9 | 15.68 | 15.26 | -3.1 |
+| 2019-20 | 13.48 | 13.40 | -2.4 | 17.81 | 17.78 | -0.4 |
+| 2020-21 | 13.65 | 13.65 | -0.4 | 15.03 | 14.68 | -5.0 |
+| 2021-22 | 14.07 | 14.03 | -1.5 | 15.30 | 15.21 | -2.1 |
+| 2022-23 | 13.05 | 13.00 | -2.1 | 14.40 | 14.21 | -4.2 |
+| 2023-24 | 13.57 | 13.58 | 0.4 | 14.76 | 14.64 | -2.8 |
+| 2024-25 | 13.22 | 13.14 | -3.2 | 14.85 | 14.71 | -3.0 |
+| 2025-26 | 13.57 | 13.54 | -1.1 | 15.17 | 15.05 | -2.5 |
+| all | 13.26 | **13.20** | **-7.1** | 15.38 | **15.20** | **-8.8** |
+
+(`t` is against the box prior alone, on the same games.) It helps in every
+womens season and all but one mens one (2023-24, even), and most where a season's
+plays are thinnest: womens before 2019-20, when last season's players are rated
+from few games and its newcomers matter more.
+
+Only the top 100 of a class are ranked, about 8% of a season's D1 players, but
+they're the newcomers who matter most.
