@@ -17,3 +17,5 @@ summaries/
 recruits/
 # ...and the per-season caches `chain` reads (`build.py chain_weeks`).
 chain-weeks/
+# ...and ESPN's roster responses (`make rosters`)
+rosters/
