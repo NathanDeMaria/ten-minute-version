@@ -3,7 +3,7 @@ import pyarrow as pa
 
 from .box_scores import STATS, BoxLine
 from .context import GameContext, Team
-from .priors import box_prior, box_profile, exposures, last_season_prior
+from .priors import BoxModel, box_prior, box_profile, exposures, last_season_prior
 from .ratings import Design, Rows
 
 
@@ -85,3 +85,29 @@ def test_exposure_counts_both_ends():
     rows = _rows()
     seen = exposures(rows, np.array([True, True]))
     assert seen["p1"] == 20 and seen["q1"] == 20
+
+
+def test_a_box_model_learned_on_one_season_rates_another(tmp_path):
+    rows = _rows()
+    design = Design.build(rows)
+    players = design.players
+    scoring = {p: float(i) for i, p in enumerate(players)}
+    fitted = np.zeros(design.columns)
+    for i, p in enumerate(players):
+        fitted[design.player_column(i, "offense")] = 0.01 * scoring[p]
+    learned_on = box_profile(
+        [_line("g1", p, 40, 10 * scoring[p]) for p in players], {"g1"}
+    )
+    model = BoxModel.learn(
+        "mens", design, fitted, learned_on, dict.fromkeys(players, 100.0)
+    )
+    path = model.save(tmp_path / "box.json", season=2025)
+    assert BoxModel.load("mens", path) == model
+    # Another season: p1 scores most now, and a player with no box score
+    # starts at zero.
+    lines = [_line("g2", p, 40, 0) for p in players if p != "q5"]
+    lines[0] = _line("g2", players[0], 40, 200)
+    prior = model.prior(design, box_profile(lines, {"g2"}))
+    offense = [prior[design.player_column(i, "offense")] for i in range(len(players))]
+    assert offense[0] == max(offense)
+    assert prior[design.player_column(players.index("q5"), "offense")] == 0

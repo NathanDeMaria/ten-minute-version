@@ -50,7 +50,14 @@ from ten_minute_version.opponents import (
     schedules,
 )
 from ten_minute_version.plays import read_games
-from ten_minute_version.priors import compare_priors, player_ratings
+from ten_minute_version.priors import FEATURES as BOX_FEATURES
+from ten_minute_version.priors import (
+    BoxModel,
+    box_profile,
+    compare_priors,
+    exposures,
+    player_ratings,
+)
 from ten_minute_version.probabilities import FEATURES, OnFloorModel
 from ten_minute_version.ratings import (
     TARGETS,
@@ -219,6 +226,73 @@ def ratings(
         )
 
 
+def _anchored_fit(
+    league: str,
+    season: int,
+    target: str,
+    player_penalty: float,
+    team_penalty: float,
+    summaries: str,
+    tables: str,
+    box: BoxModel | None = None,
+):
+    """
+    A season's team-anchored fit on all its games, real and estimated --
+    pulled toward `box`'s box-score prior if given: (rows, shots, design, b),
+    or None if the season isn't built.
+    """
+    built = _season_rows(league, season, summaries, tables, with_estimated=True)
+    if built is None:
+        return None
+    rows, shot_rows = built
+    y = TARGETS[target](targets(rows, shot_rows, set(rows.game_id)))
+    design = Design.build(rows, teams=True)
+    pen = penalties(design, player=player_penalty, team=team_penalty)
+    prior = None
+    if box is not None:
+        profile = box_profile(
+            read_box_lines(summaries, league, season), set(rows.game_id)
+        )
+        prior = box.prior(design, profile)
+    return rows, shot_rows, design, solve(design, y, rows.possessions, pen, prior=prior)
+
+
+def box_model(
+    league: str,
+    season: int = 2025,
+    target: str = "half on 3s and FTs",
+    player_penalty: float = 1000,
+    team_penalty: float = 30,
+    summaries: str = "./summaries",
+    tables: str = "./stints",
+):
+    """
+    Learn the box-score prior `season_ratings` uses (`priors.BoxModel`) from
+    a season with real lineups, and write it to `releases/`: commit what
+    this changes.
+    """
+    built = _anchored_fit(
+        league, season, target, player_penalty, team_penalty, summaries, tables
+    )
+    assert built is not None, f"no tables for {league} {season}"
+    rows, _, design, b = built
+    games = set(rows.game_id)
+    profile = box_profile(read_box_lines(summaries, league, season), games)
+    exposure = exposures(rows, np.ones(len(rows), bool))
+    model = BoxModel.learn(league, design, b, profile, exposure)
+    path = model.save(
+        season=season,
+        games=len(games),
+        target=target,
+        player_penalty=player_penalty,
+        team_penalty=team_penalty,
+    )
+    print(f"wrote {path}")
+    names = ("intercept", *BOX_FEATURES)
+    for name, o, d in zip(names, model.offense, model.defense):
+        print(f"    {name:<22}off {100 * o:+6.2f}  def {100 * d:+6.2f}")
+
+
 def season_ratings(
     league: str,
     first: int = 2013,
@@ -226,6 +300,7 @@ def season_ratings(
     target: str = "half on 3s and FTs",
     player_penalty: float = 1000,
     team_penalty: float = 30,
+    box_prior: bool = True,
     top: int = 15,
     min_possessions: int = 1000,
     summaries: str = "./summaries",
@@ -234,32 +309,30 @@ def season_ratings(
     """
     Every season's players rated from all of its games -- real lineups where
     the feed has them, estimated possessions where it doesn't -- with the
-    team columns `ratings` writes, to `season_ratings.parquet` next to each
+    team columns `ratings` writes and, unless `box_prior` is off, pulled
+    toward what the box score says (`box_model`'s release) rather than
+    toward their team alone. To `season_ratings.parquet` next to each
     season's tables; and each season's best by total, among players on the
     floor for at least `min_possessions` possessions at each end.
     """
+    box = BoxModel.load(league) if box_prior else None
     for season in range(first, last + 1):
-        built = _season_rows(league, season, summaries, tables, with_estimated=True)
+        built = _anchored_fit(
+            league,
+            season,
+            target,
+            player_penalty,
+            team_penalty,
+            summaries,
+            tables,
+            box,
+        )
         if built is None:
             print(f"{league} {season}: no tables")
             continue
-        rows, shot_rows = built
-        y = TARGETS[target](targets(rows, shot_rows, set(rows.game_id)))
-        design = Design.build(rows, teams=True)
-        pen = penalties(design, player=player_penalty, team=team_penalty)
-        b = solve(design, y, rows.possessions, pen)
+        rows, _, design, b = built
+        table = _ratings_table(league, season, rows, design, b, summaries, tables)
         directory = Path(tables) / f"league={league}" / f"season={season}"
-        names = {
-            r["athlete_id"]: r["athlete_name"]
-            for r in pq.read_table(directory / "players.parquet").to_pylist()
-        }
-        contexts = read_context(summaries, league, season)
-        team_names = {
-            c.team(side).team_id: c.team(side).name
-            for c in contexts.values()
-            for side in ("home", "away")
-        }
-        table = ratings_table(league, season, rows, design, b, names, team_names)
         pq.write_table(table, directory / "season_ratings.parquet", compression="zstd")
         played = [
             r
@@ -279,6 +352,21 @@ def season_ratings(
                 f" total {r['total']:+5.1f}",
                 flush=True,
             )
+
+
+def _ratings_table(league, season, rows, design, b, summaries, tables) -> pa.Table:
+    directory = Path(tables) / f"league={league}" / f"season={season}"
+    names = {
+        r["athlete_id"]: r["athlete_name"]
+        for r in pq.read_table(directory / "players.parquet").to_pylist()
+    }
+    contexts = read_context(summaries, league, season)
+    team_names = {
+        c.team(side).team_id: c.team(side).name
+        for c in contexts.values()
+        for side in ("home", "away")
+    }
+    return ratings_table(league, season, rows, design, b, names, team_names)
 
 
 def estimated(
@@ -453,6 +541,7 @@ def carryover(
     team_penalty: float = 30,
     tune_until: str = "",
     test_until: str = "",
+    box_prior: bool = True,
     summaries: str = "./summaries",
     tables: str = "./stints",
 ):
@@ -460,7 +549,9 @@ def carryover(
     Whether last season's ratings predict this season's early games
     (`ten_minute_version.carryover`): team carryover, last season's players
     from its real lineups alone (where it has any) and with its estimated
-    possessions, and each with the team carryover. Weights are fitted on the
+    possessions, as `season_ratings` writes them (team-anchored and pulled
+    toward the box score, unless `box_prior` is off), and each with the team
+    carryover. Weights are fitted on the
     games through `tune_until` (default: the season's first two weeks, to
     Nov 16 in 2025-26 and Dec 8 in 2020-21, which started late) and scored on
     the rest through `test_until` (default: Dec 31).
@@ -475,6 +566,7 @@ def carryover(
         test_until,
         summaries,
         tables,
+        box=BoxModel.load(league) if box_prior else None,
     )
     print(f"weights fitted on {tuned} games, scored on {scored}")
     print(f"{'from last season':34s} {'margin RMSE':>11s} {'t vs team':>9s}")
@@ -490,20 +582,43 @@ def carryovers(
     target: str = "half on 3s and FTs",
     penalty: float = 300,
     team_penalty: float = 30,
+    box_prior: bool = True,
     summaries: str = "./summaries",
     tables: str = "./stints",
 ):
     """
     `carryover` for every season from `first` to `last`, each from the one
     before, a line a season -- and over all of them, every season's scored
-    games together.
+    games together. Three ways to predict: last season's teams, teams and
+    players fitted without a prior, and teams and players as
+    `season_ratings` writes them (with the box-score prior, unless
+    `box_prior` is off). Each `t` is against the column before it.
     """
-    best = "team + players, with estimated"
-    pooled: dict[str, list[np.ndarray]] = {"team carryover": [], best: []}
+    box = BoxModel.load(league) if box_prior else None
+    names = ["team carryover", "team + players, with estimated"]
+    if box is not None:
+        names.append("team + players, box prior")
+    pooled: dict[str, list[np.ndarray]] = {name: [] for name in names}
+    labels = ("teams", "+ players", "+ box prior")[: len(names)]
     print(
-        f"{'season':>6s} {'games':>6s} {'team carryover':>14s}"
-        f" {'team + players':>14s} {'t':>6s}"
+        f"{'season':>6s} {'games':>6s} "
+        + " ".join(
+            f"{label:>11s}" + ("" if k == 0 else f" {'t':>6s}")
+            for k, label in enumerate(labels)
+        )
     )
+
+    def line(head: str, n: int, errors: list[np.ndarray]) -> str:
+        cells = []
+        for k, e in enumerate(errors):
+            cells.append(f"{np.sqrt(np.mean(e**2)):11.2f}")
+            if k:
+                gap = e**2 - errors[k - 1] ** 2
+                cells.append(
+                    f"{gap.mean() / (gap.std(ddof=1) / np.sqrt(len(gap))):6.1f}"
+                )
+        return f"{head:>6s} {n:6d} " + " ".join(cells)
+
     for season in range(first, last + 1):
         results, _, scored = _carryover(
             league,
@@ -516,22 +631,16 @@ def carryovers(
             summaries,
             tables,
             quiet=True,
+            box=box,
         )
         by = {r.name: r for r in results}
-        for name in pooled:
+        for name in names:
             pooled[name].append(by[name].errors)
         print(
-            f"{season:6d} {scored:6d} {by['team carryover'].rmse:14.2f}"
-            f" {by[best].rmse:14.2f} {by[best].t_vs_team:6.1f}",
-            flush=True,
+            line(str(season), scored, [by[name].errors for name in names]), flush=True
         )
-    team, players = (np.concatenate(pooled[name]) for name in pooled)
-    gap = players**2 - team**2
-    t = gap.mean() / (gap.std(ddof=1) / np.sqrt(len(gap)))
-    print(
-        f"{'all':>6s} {len(team):6d} {np.sqrt(np.mean(team**2)):14.2f}"
-        f" {np.sqrt(np.mean(players**2)):14.2f} {t:6.1f}"
-    )
+    together = [np.concatenate(pooled[name]) for name in names]
+    print(line("all", len(together[0]), together))
 
 
 def _carryover(
@@ -545,6 +654,8 @@ def _carryover(
     summaries: str,
     tables: str,
     quiet: bool = False,
+    box: BoxModel | None = None,
+    anchored_penalty: float = 1000,
 ) -> tuple[list[Result], int, int]:
     """`carryover`'s results, and how many games it tuned and scored on."""
     test_end = date.fromisoformat(test_until) if test_until else date(season, 12, 31)
@@ -579,6 +690,26 @@ def _carryover(
                 f" {len(set(last_rows.game_id))} games",
                 flush=True,
             )
+    if box is not None:
+        built = _anchored_fit(
+            league,
+            season - 1,
+            target,
+            anchored_penalty,
+            team_penalty,
+            summaries,
+            tables,
+            box,
+        )
+        assert built is not None, f"no tables for {league} {season - 1}"
+        last_rows, _, design, b = built
+        table = ratings_table(league, season - 1, last_rows, design, b, {}, {})
+        # per possession, a fifth of his team's included, as the players'
+        # sums in `game_terms` need
+        players["box prior"] = {
+            r["athlete_id"]: (r["offense"] / 100, r["defense"] / 100)
+            for r in table.to_pylist()
+        }
     # This season's lineups as well: estimated, before there were real ones.
     built = _season_rows(league, season, summaries, tables, with_estimated=True)
     assert built is not None, f"no tables for {league} {season}"
@@ -727,6 +858,7 @@ if __name__ == "__main__":
             "context": context,
             "ratings": ratings,
             "season_ratings": season_ratings,
+            "box_model": box_model,
             "priors": priors,
             "estimated": estimated,
             "carryover": carryover,

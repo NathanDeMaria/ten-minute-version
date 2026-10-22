@@ -312,3 +312,58 @@ points, and by most the season after COVID, when a team's 2020-21 said least
 about it. In womens they do from 2019-20, the first season with plays for
 every game; before it, with plays for only a quarter of games, last season's
 players are rated from too few of them to add much.
+
+## Every season's ratings, and the box-score prior
+
+`season_ratings` (`make season-ratings ARGS="--league mens"`, after `make seasons`)
+rates every season from all its games, real lineups and estimated, team-anchored as
+`ratings.parquet` is, and writes `season_ratings.parquet` next to each season's
+tables. Rated that way alone, it puts too much on teams: a fifth of the team's rating
+goes to each player, and with estimated lineups unable to tell a team's starters
+apart, the rest goes to them about equally. Cooper Flagg came out 442nd in 2024-25 on
+his part apart from Duke's, and the ratings carried over to the next season no
+better than Duke's team rating did.
+
+So each player starts from what his **box score** says instead (`priors.BoxModel`):
+his per-40-minute rates, minutes, how often he started and his position, through a
+regression of the team-anchored ratings on them. It's learned once, on 2025-26, the
+one full season of real lineups (`make box-model ARGS="--league mens"`, written to
+`releases/box-prior-{league}.json`), because learned on a season of estimated
+lineups it learns the same blur. A player still ends up where his lineups put him;
+the box score only says where he starts, which matters most for the players and
+seasons the lineups say least about.
+
+Carried over to the next season as above (`carryovers` prints all three):
+
+| season | mens: teams | + players | + box prior | t | womens: teams | + players | + box prior | t |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 2014-15 | 13.48 | 12.78 | 12.64 | -3.5 | 15.98 | 16.12 | 16.01 | -1.4 |
+| 2015-16 | 13.61 | 12.82 | 12.57 | -5.3 | 15.64 | 15.18 | 15.34 | 3.0 |
+| 2016-17 | 13.49 | 12.86 | 12.64 | -4.4 | 15.27 | 15.14 | 15.16 | 0.8 |
+| 2017-18 | 14.38 | 13.42 | 13.26 | -3.7 | 16.05 | 15.91 | 15.84 | -2.5 |
+| 2018-19 | 14.20 | 13.60 | 13.43 | -3.2 | 15.93 | 15.66 | 15.68 | 0.3 |
+| 2019-20 | 15.07 | 13.77 | 13.48 | -7.1 | 18.47 | 17.88 | 17.81 | -0.8 |
+| 2020-21 | 14.24 | 13.72 | 13.65 | -2.0 | 15.82 | 15.49 | 15.03 | -4.9 |
+| 2021-22 | 16.87 | 14.31 | 14.07 | -2.5 | 18.34 | 15.61 | 15.30 | -2.9 |
+| 2022-23 | 14.60 | 13.28 | 13.05 | -4.8 | 16.34 | 14.92 | 14.40 | -9.2 |
+| 2023-24 | 14.85 | 13.89 | 13.57 | -7.6 | 16.87 | 15.21 | 14.76 | -6.8 |
+| 2024-25 | 14.53 | 13.45 | 13.22 | -4.8 | 17.10 | 15.26 | 14.85 | -5.7 |
+| 2025-26 | 15.03 | 13.91 | 13.57 | -7.3 | 18.25 | 15.62 | 15.17 | -6.4 |
+| all | 14.58 | 13.50 | **13.26** | **-15.4** | 17.18 | 15.69 | **15.38** | **-12.3** |
+
+(`t` is the box prior against players fitted without one, on the same games.) It wins
+every mens season, and every womens season from 2019-20, when plays cover every game.
+2025-26's line isn't a clean test: the box model was learned on its season, if not on
+the games before Dec 31 alone.
+
+As a check that doesn't depend on predicting anything: where each season's national
+player of the year ranks in `season_ratings.parquet` (players with 1,000+ possessions
+at each end, by total), with the box prior and without:
+
+| | median rank, mens 2013-14 to 2024-25 | median rank, womens 2013-14 to 2023-24 |
+| --- | --- | --- |
+| team-anchored | 20 | 4 |
+| team-anchored + box prior | 10 | 2 |
+
+Zion Williamson, Zach Edey (2023-24) and five of the women's are first; Buddy Hield
+(108th) and Cooper Flagg (13th) are where it still misses.
