@@ -95,6 +95,9 @@ from ten_minute_version.recruiting import (
 from ten_minute_version.recruiting import (
     features as recruit_features,
 )
+from ten_minute_version.rosters import current as roster_current
+from ten_minute_version.rosters import fetch as fetch_roster
+from ten_minute_version.rosters import roster_rows, roster_table
 from ten_minute_version.stints import season_tables
 
 
@@ -704,6 +707,171 @@ def _team_ratings(
     }
 
 
+def _histories(league: str, tables: str, spells, found):
+    """`preseason.History` for any season, from what the seasons before it
+    left: their minutes, their `season_ratings`, the recruits."""
+    ratings = {
+        season: {
+            r["athlete_id"]: (r["offense"] / 100, r["defense"] / 100) for r in rows
+        }
+        for season, rows in _rating_tables(league, tables).items()
+    }
+    played: dict[str, set[int]] = {}
+    for season, season_spells in spells.items():
+        for spell in season_spells:
+            played.setdefault(spell.athlete_id, set()).add(season)
+
+    def history(season: int) -> History:
+        last_spells: dict[str, list[Spell]] = {}
+        for spell in spells.get(season - 1, []):
+            last_spells.setdefault(spell.athlete_id, []).append(spell)
+        return History(last_spells, ratings.get(season - 1, {}), found, played)
+
+    return history
+
+
+def _minutes_examples(spells, histories):
+    """Each season's (features, shares) for `MinutesModel`: everyone who
+    played, by what was known before it."""
+    examples = {}
+    for season, history in histories.items():
+        players = season_roster(spells[season])
+        share = {(s.athlete_id, s.team_id): s.share for s in spells[season]}
+        x = np.array([minutes_features(p, t, season, history) for p, t in players])
+        examples[season] = (x, np.array([share[k] for k in players]))
+    return examples
+
+
+def rosters(
+    league: str,
+    season: int = 2026,
+    root: str = "./rosters",
+    summaries: str = "./summaries",
+    tables: str = "./stints",
+    refetch: bool = False,
+):
+    """
+    The coming season's rosters, for every team ESPN filed in Division I
+    the season before (`rosters`): `roster.parquet` in the season's tables.
+    ESPN only serves current rosters, so `season` is the one about to start;
+    a team whose roster ESPN hasn't moved on to it yet is left out, and
+    named.
+    """
+    contexts = read_context(summaries, league, season - 1)
+    teams = sorted(
+        {
+            c.team(side).team_id
+            for c in contexts.values()
+            for side in ("home", "away")
+            if c.team(side).division_one
+        }
+    )
+    rows = []
+    stale = []
+    for k, team in enumerate(teams):
+        response = fetch_roster(root, league, season, team, refetch)
+        if roster_current(response, season):
+            rows += roster_rows(team, response)
+        else:
+            stale.append(team)
+        if (k + 1) % 50 == 0:
+            print(f"  {k + 1} of {len(teams)} teams", flush=True)
+    table = roster_table(rows)
+    directory = Path(tables) / f"league={league}" / f"season={season}"
+    directory.mkdir(parents=True, exist_ok=True)
+    pq.write_table(table, directory / "roster.parquet", compression="zstd")
+    print(f"{len(teams) - len(stale)} teams, {table.num_rows} players")
+    if stale:
+        print(
+            f"  {len(stale)} teams' rosters are still last season's, left out"
+            f" (rerun with --refetch later): {', '.join(stale)}"
+        )
+
+
+def project(
+    league: str,
+    season: int = 2026,
+    first: int = 2014,
+    top: int = 25,
+    recruits: str = "./recruits",
+    summaries: str = "./summaries",
+    tables: str = "./stints",
+):
+    """
+    Every team's projected offense and defense before `season` starts
+    (`preseason`), from its roster (`rosters`), last season's ratings
+    (`season_ratings`), recruits and minutes: `projection.parquet` in the
+    season's tables, and the best `top` printed with who carries them.
+    The minutes model is learned on every season from `first`.
+    """
+    spells = _spells(league, tables)
+    found = read_recruits(recruits, league)
+    history = _histories(league, tables, spells, found)
+    past = {s: history(s) for s in range(first, season) if s in spells}
+    examples = _minutes_examples(spells, past)
+    model = MinutesModel.learn(
+        np.vstack([x for x, _ in examples.values()]),
+        np.concatenate([y for _, y in examples.values()]),
+    )
+    recruit = RecruitModel.load(league)
+    directory = Path(tables) / f"league={league}" / f"season={season}"
+    listed = pq.read_table(directory / "roster.parquet").to_pylist()
+    now = history(season)
+    players = sorted((r["athlete_id"], r["team_id"]) for r in listed)
+    x = np.array([minutes_features(p, t, season, now) for p, t in players])
+    shares = model.project(players, x)
+    teams = project_teams(shares, season, now, recruit)
+    names = {r["athlete_id"]: r["name"] for r in listed}
+    contexts = read_context(summaries, league, season - 1)
+    team_names = {
+        c.team(side).team_id: c.team(side).name
+        for c in contexts.values()
+        for side in ("home", "away")
+    }
+    carried: dict[str, list[tuple[float, str, float, float, str]]] = {}
+    for (player, team), share in shares.items():
+        rating = now.last_ratings.get(player)
+        last = {s.team_id for s in now.last_spells.get(player, ())}
+        how = "newcomer" if not last else "returning" if team in last else "transfer"
+        if rating is None:
+            rating = recruit.rating(now.recruits.get(player), season)
+            if recruit_features(now.recruits.get(player), season)[0]:
+                how = f"recruit #{now.recruits[player].rank}"
+        total = 100 * sum(rating)
+        carried.setdefault(team, []).append(
+            (share * total, names.get(player) or player, total, share, how)
+        )
+    ranked = sorted(
+        ((team, 100 * o, 100 * d) for team, (o, d) in teams.items()),
+        key=lambda r: -(r[1] + r[2]),
+    )
+    rows = [
+        {
+            "team_id": team,
+            "team": team_names.get(team),
+            "offense": o,
+            "defense": d,
+            "net": o + d,
+        }
+        for team, o, d in ranked
+    ]
+    pq.write_table(
+        pa.Table.from_pylist(rows), directory / "projection.parquet", compression="zstd"
+    )
+    print(f"{league} {season}-{(season + 1) % 100:02d}, {len(rows)} teams; per 100")
+    print(f"{'':4s} {'team':28s} {'net':>6s} {'off':>6s} {'def':>6s}  carried by")
+    for rank, (team, o, d) in enumerate(ranked[:top], start=1):
+        best = sorted(carried[team], reverse=True)[:3]
+        who = "; ".join(
+            f"{name} {total:+.1f} x{share:.2f} ({how})"
+            for _, name, total, share, how in best
+        )
+        print(
+            f"{rank:3d}. {team_names.get(team) or team:28s} {o + d:+6.1f}"
+            f" {o:+6.1f} {d:+6.1f}  {who}"
+        )
+
+
 def preseasons(
     league: str,
     first: int = 2014,
@@ -725,34 +893,11 @@ def preseasons(
     `season_ratings` and `minutes` for every season first.
     """
     spells = _spells(league, tables)
-    ratings = {
-        season: {
-            r["athlete_id"]: (r["offense"] / 100, r["defense"] / 100) for r in rows
-        }
-        for season, rows in _rating_tables(league, tables).items()
-    }
     found = read_recruits(recruits, league)
-    played: dict[str, set[int]] = {}
-    for season, season_spells in spells.items():
-        for spell in season_spells:
-            played.setdefault(spell.athlete_id, set()).add(season)
-
-    def history(season: int) -> History:
-        last_spells: dict[str, list[Spell]] = {}
-        for spell in spells.get(season - 1, []):
-            last_spells.setdefault(spell.athlete_id, []).append(spell)
-        return History(last_spells, ratings.get(season - 1, {}), found, played)
-
+    history = _histories(league, tables, spells, found)
     seasons = range(first, last + 1)
     histories = {season: history(season) for season in seasons}
-    examples = {}
-    for season in seasons:
-        players = season_roster(spells[season])
-        share = {(s.athlete_id, s.team_id): s.share for s in spells[season]}
-        x = np.array(
-            [minutes_features(p, t, season, histories[season]) for p, t in players]
-        )
-        examples[season] = (x, np.array([share[k] for k in players]))
+    examples = _minutes_examples(spells, histories)
     rating_tables = _rating_tables(league, tables)
     names = [
         "team carryover",
@@ -1156,6 +1301,8 @@ if __name__ == "__main__":
             "recruit_model": recruit_model,
             "minutes": minutes,
             "preseasons": preseasons,
+            "rosters": rosters,
+            "project": project,
             "priors": priors,
             "estimated": estimated,
             "carryover": carryover,
