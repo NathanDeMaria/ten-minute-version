@@ -1,4 +1,8 @@
-from .box_scores import parse_box_lines
+import gzip
+import json
+from datetime import date
+
+from .box_scores import parse_box_lines, season_minutes
 
 _KEYS = [
     "minutes",
@@ -81,3 +85,26 @@ def test_players_without_stats_or_an_id_have_no_line():
         ),
     )
     assert [line.athlete_id for line in lines] == ["p1"]
+
+
+def test_season_minutes_are_shares_of_the_team_and_date_the_first_game(tmp_path):
+    games = tmp_path / "mens" / "2024"
+    games.mkdir(parents=True)
+    for game_id, day, minutes in (
+        ("1", "2024-11-04T23:00Z", "30"),
+        ("2", "2024-11-08T23:00Z", "10"),
+    ):
+        summary = _summary(
+            _athlete("a", stats=[minutes, *_athlete("x")["stats"][1:]]),
+            _athlete("b", stats=["10", *_athlete("x")["stats"][1:]]),
+        )
+        summary["header"] = {"competitions": [{"date": day}]}
+        with gzip.open(games / f"{game_id}.json.gz", "wt") as file:
+            json.dump(summary, file)
+    rows = {
+        r["athlete_id"]: r for r in season_minutes(tmp_path, "mens", 2024).to_pylist()
+    }
+    assert rows["a"]["minutes"] == 40 and rows["a"]["games"] == 2
+    # a played 40 of the team's 60 minutes: two-thirds of five
+    assert abs(rows["a"]["share"] - 5 * 40 / 60) < 1e-9
+    assert rows["a"]["first_date"] == date(2024, 11, 4)

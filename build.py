@@ -29,8 +29,14 @@ import pyarrow.compute  # noqa: F401  (pa.compute)
 import pyarrow.parquet as pq
 from fire import Fire
 
-from ten_minute_version.box_scores import read_box_lines
-from ten_minute_version.carryover import Result, compare, game_terms, variants
+from ten_minute_version.box_scores import read_box_lines, season_minutes
+from ten_minute_version.carryover import (
+    GameTerms,
+    Result,
+    compare,
+    game_terms,
+    variants,
+)
 from ten_minute_version.context import context_table, read_context
 from ten_minute_version.estimate import Rules, nearest_action_floors, season_context
 from ten_minute_version.estimated import estimated_tables
@@ -51,6 +57,16 @@ from ten_minute_version.opponents import (
     schedules,
 )
 from ten_minute_version.plays import read_games
+from ten_minute_version.preseason import FEATURES as MINUTES_FEATURES
+from ten_minute_version.preseason import (
+    History,
+    MinutesModel,
+    Spell,
+    project_teams,
+    team_term,
+)
+from ten_minute_version.preseason import features as minutes_features
+from ten_minute_version.preseason import roster as season_roster
 from ten_minute_version.priors import FEATURES as BOX_FEATURES
 from ten_minute_version.priors import (
     BoxModel,
@@ -636,6 +652,192 @@ def recruit_model(league: str, recruits: str = "./recruits", tables: str = "./st
         )
 
 
+def minutes(
+    league: str, season: int, summaries: str = "./summaries", tables: str = "./stints"
+):
+    """
+    Each player's minutes for each team in a season, from the box scores
+    (`box_scores.season_minutes`): `minutes.parquet` next to the season's
+    tables, for the preseason projection.
+    """
+    table = season_minutes(summaries, league, season)
+    directory = Path(tables) / f"league={league}" / f"season={season}"
+    directory.mkdir(parents=True, exist_ok=True)
+    pq.write_table(table, directory / "minutes.parquet", compression="zstd")
+    print(f"{table.num_rows} player-teams")
+
+
+def _spells(league: str, tables: str) -> dict[int, list[Spell]]:
+    """Every season's `minutes.parquet`, by season."""
+    found = {}
+    for path in sorted(Path(tables).glob(f"league={league}/season=*/minutes.parquet")):
+        found[int(path.parent.name.split("=")[1])] = [
+            Spell(r["athlete_id"], r["team_id"], r["share"], r["first_date"])
+            for r in pq.read_table(path).to_pylist()
+        ]
+    return found
+
+
+def _team_ratings(
+    league: str,
+    season: int,
+    target: str,
+    team_penalty: float,
+    summaries: str,
+    tables: str,
+) -> dict[str, tuple[float, float]]:
+    """A season's team-only ratings, per possession, as carryover uses them."""
+    built = _season_rows(league, season, summaries, tables, with_estimated=True)
+    assert built is not None, f"no tables for {league} {season}"
+    rows, shots = built
+    y = TARGETS[target](targets(rows, shots, set(rows.game_id)))
+    design = Design.build(rows, players=False, teams=True)
+    b = solve(
+        design, y, rows.possessions, penalties(design, player=0, team=team_penalty)
+    )
+    return {
+        team: (
+            float(b[design.team_column(i, "offense")]),
+            float(b[design.team_column(i, "defense")]),
+        )
+        for i, team in enumerate(design.teams)
+    }
+
+
+def preseasons(
+    league: str,
+    first: int = 2014,
+    last: int = 2025,
+    target: str = "half on 3s and FTs",
+    team_penalty: float = 30,
+    recruits: str = "./recruits",
+    summaries: str = "./summaries",
+    tables: str = "./stints",
+):
+    """
+    How well each season's teams are known before it starts
+    (`ten_minute_version.preseason`): every season from `first` to `last`,
+    its early games (to Dec 31) predicted from last season's team ratings,
+    from its rosters projected (players' ratings times projected minutes),
+    and from both -- with the whole season's roster, and with only who's
+    played by the end of the first two weeks. The minutes and recruit
+    models are learned on every season but the one predicted. Run
+    `season_ratings` and `minutes` for every season first.
+    """
+    spells = _spells(league, tables)
+    ratings = {
+        season: {
+            r["athlete_id"]: (r["offense"] / 100, r["defense"] / 100) for r in rows
+        }
+        for season, rows in _rating_tables(league, tables).items()
+    }
+    found = read_recruits(recruits, league)
+    played: dict[str, set[int]] = {}
+    for season, season_spells in spells.items():
+        for spell in season_spells:
+            played.setdefault(spell.athlete_id, set()).add(season)
+
+    def history(season: int) -> History:
+        last_spells: dict[str, list[Spell]] = {}
+        for spell in spells.get(season - 1, []):
+            last_spells.setdefault(spell.athlete_id, []).append(spell)
+        return History(last_spells, ratings.get(season - 1, {}), found, played)
+
+    seasons = range(first, last + 1)
+    histories = {season: history(season) for season in seasons}
+    examples = {}
+    for season in seasons:
+        players = season_roster(spells[season])
+        share = {(s.athlete_id, s.team_id): s.share for s in spells[season]}
+        x = np.array(
+            [minutes_features(p, t, season, histories[season]) for p, t in players]
+        )
+        examples[season] = (x, np.array([share[k] for k in players]))
+    rating_tables = _rating_tables(league, tables)
+    names = [
+        "team carryover",
+        "projected roster",
+        "team + projected roster",
+        "team + projected, early roster",
+    ]
+    pooled: dict[str, list[np.ndarray]] = {name: [] for name in names}
+    print(
+        f"{'season':>6s} {'games':>6s} {'teams':>7s} {'roster':>7s} {'both':>7s}"
+        f" {'t':>6s} {'early':>7s} {'t':>6s}"
+    )
+
+    def gap_t(e: np.ndarray, reference: np.ndarray) -> float:
+        gap = e**2 - reference**2
+        return float(gap.mean() / (gap.std(ddof=1) / np.sqrt(len(gap))))
+
+    def line(head: str, n: int, errors: dict[str, np.ndarray]) -> str:
+        rmse = {k: np.sqrt(np.mean(v**2)) for k, v in errors.items()}
+        team = errors["team carryover"]
+        return (
+            f"{head:>6s} {n:6d} {rmse[names[0]]:7.2f} {rmse[names[1]]:7.2f}"
+            f" {rmse[names[2]]:7.2f} {gap_t(errors[names[2]], team):6.1f}"
+            f" {rmse[names[3]]:7.2f} {gap_t(errors[names[3]], team):6.1f}"
+        )
+
+    for season in seasons:
+        others = [s for s in seasons if s != season]
+        model = MinutesModel.learn(
+            np.vstack([examples[s][0] for s in others]),
+            np.concatenate([examples[s][1] for s in others]),
+        )
+        recruit = _recruit_model(league, rating_tables, found, leave_out=season)
+        built = _season_rows(league, season, summaries, tables, with_estimated=True)
+        assert built is not None, f"no tables for {league} {season}"
+        rows, _ = built
+        directory = Path(tables) / f"league={league}" / f"season={season}"
+        day = {
+            r["game_id"]: r["date"]
+            for r in pq.read_table(directory / "games.parquet").to_pylist()
+        }
+        games = sorted({g for g in rows.game_id if day[g] <= date(season, 12, 31)})
+        tune_end = min(day[g] for g in games) + timedelta(days=13)
+        teams = _team_ratings(
+            league, season - 1, target, team_penalty, summaries, tables
+        )
+        terms = game_terms(rows, games, teams, {})
+        generic = histories[season].last_ratings.get("generic", (0.0, 0.0))
+        extra = {}
+        for name, by in (("projected", None), ("projected, early", tune_end)):
+            players = season_roster(spells[season], by)
+            x = np.array(
+                [minutes_features(p, t, season, histories[season]) for p, t in players]
+            )
+            projected = project_teams(
+                model.project(players, x), season, histories[season], recruit
+            )
+            extra[name] = team_term(rows, games, projected, generic)
+        both = GameTerms(terms.games, terms.actual, {**terms.terms, **extra})
+        results = compare(
+            both,
+            day,
+            tune_end,
+            {
+                names[0]: ["home", "balance", "team"],
+                names[1]: ["home", "balance", "projected"],
+                names[2]: ["home", "balance", "team", "projected"],
+                names[3]: ["home", "balance", "team", "projected, early"],
+            },
+        )
+        errors = {r.name: r.errors for r in results}
+        for name in names:
+            pooled[name].append(errors[name])
+        print(line(str(season), len(errors[names[0]]), errors), flush=True)
+    together = {name: np.concatenate(parts) for name, parts in pooled.items()}
+    print(line("all", len(together[names[0]]), together))
+    print("\nminutes model, every season:")
+    model = MinutesModel.learn(
+        np.vstack([examples[s][0] for s in seasons]),
+        np.concatenate([examples[s][1] for s in seasons]),
+    )
+    for name, value in zip(("intercept", *MINUTES_FEATURES), model.coefficients):
+        print(f"    {name:<16}{value:+.3f}")
+
+
 def carryovers(
     league: str,
     first: int = 2014,
@@ -952,6 +1154,8 @@ if __name__ == "__main__":
             "season_ratings": season_ratings,
             "box_model": box_model,
             "recruit_model": recruit_model,
+            "minutes": minutes,
+            "preseasons": preseasons,
             "priors": priors,
             "estimated": estimated,
             "carryover": carryover,
