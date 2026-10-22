@@ -15,3 +15,5 @@ stints/
 summaries/
 # ...and of so-high-school's recruits (`make recruits`): ESPN's, not to commit.
 recruits/
+# ...and the per-season caches `chain` reads (`build.py chain_weeks`).
+chain-weeks/
