@@ -88,6 +88,18 @@ carryovers:
 	uv run python build.py carryovers $(ARGS)
 
 
+# Every season rated from all its games, pulled toward the box score:
+#   make season-ratings ARGS="--league mens"
+# and the box-score prior it uses, learned on a season of real lineups --
+# commit what this changes:
+#   make box-model ARGS="--league mens --season 2025"
+season-ratings:
+	uv run python build.py season_ratings $(ARGS)
+
+box-model:
+	uv run python build.py box_model $(ARGS)
+
+
 # How good the estimated lineups are, on games whose real ones are known:
 #   make evaluate ARGS="--league mens --season 2025 --train 2024"
 # `--train` fits the probabilities on another season first, for an honest
@@ -103,4 +115,4 @@ fit:
 	uv run python build.py fit $(ARGS)
 
 
-.PHONY: lint check test plays summaries stints context seasons ratings estimated priors carryover carryovers evaluate fit
+.PHONY: lint check test plays summaries stints context seasons ratings estimated priors carryover carryovers season-ratings box-model evaluate fit

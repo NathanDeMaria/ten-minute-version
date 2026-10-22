@@ -15,13 +15,19 @@ scored against none on the same held-out games (`compare_priors`):
   the training games;
 - **last season**: his rating a season before, scaled down by a factor
   chosen on held-out games -- and that alongside the box score, as one more
-  feature of the same regression.
+  feature of the same regression;
+- **a fixed box score** (`BoxModel`): the same regression, learned once on a
+  season with real lineups and shipped in `releases/`, then applied to any
+  season. A season of estimated lineups can't tell teammates apart well, so
+  a regression learned on it learns little that tells them apart either.
 
 A prior only moves where the fit starts from; a player who played enough
 still ends up where his lineups put him.
 """
 
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
 import numpy as np
@@ -132,6 +138,115 @@ def box_prior(
         )
         prior[columns] = x @ beta
     return prior
+
+
+_RELEASES = Path(__file__).parent / "releases"
+
+
+@dataclass(frozen=True)
+class BoxModel:
+    """
+    A box-score regression to take from one season to another: each
+    player's offense and defense (per possession, against his team, as the
+    team-anchored fit has them) from his `FEATURES`, standardised by the
+    season it was learned on.
+    """
+
+    league: str
+    mean: tuple[float, ...]
+    sd: tuple[float, ...]
+    # intercept first, then one per feature
+    offense: tuple[float, ...]
+    defense: tuple[float, ...]
+
+    @staticmethod
+    def release_path(league: str) -> Path:
+        return _RELEASES / f"box-prior-{league}.json"
+
+    @classmethod
+    def learn(
+        cls,
+        league: str,
+        design: Design,
+        fitted: np.ndarray,
+        profile: BoxProfile,
+        exposure: Mapping[str, float],
+    ) -> "BoxModel":
+        """Regress `fitted`'s player columns on the box score, weighted by
+        possessions, as `box_prior` does."""
+        at = {p: i for i, p in enumerate(profile.players)}
+        known = [(i, p) for i, p in enumerate(design.players) if p in at]
+        x = profile.features[[at[p] for _, p in known]]
+        mean, sd = x.mean(axis=0), x.std(axis=0)
+        sd[sd == 0] = 1.0
+        x = np.hstack([np.ones((len(known), 1)), (x - mean) / sd])
+        w = np.array([exposure.get(p, 0.0) for _, p in known])
+        beta = {}
+        for side in ("offense", "defense"):
+            y = fitted[[design.player_column(i, side) for i, _ in known]]
+            beta[side] = np.linalg.solve(
+                (x * w[:, None]).T @ x + 1e-3 * np.eye(x.shape[1]),
+                (x * w[:, None]).T @ y,
+            )
+        return cls(
+            league,
+            tuple(map(float, mean)),
+            tuple(map(float, sd)),
+            tuple(map(float, beta["offense"])),
+            tuple(map(float, beta["defense"])),
+        )
+
+    def prior(self, design: Design, profile: BoxProfile) -> np.ndarray:
+        """A prior vector for `design`: what the box score says of each
+        player's offense and defense. A player with no box score gets 0."""
+        at = {p: i for i, p in enumerate(profile.players)}
+        prior = np.zeros(design.columns)
+        mean, sd = np.array(self.mean), np.array(self.sd)
+        offense, defense = np.array(self.offense), np.array(self.defense)
+        for i, p in enumerate(design.players):
+            if p not in at:
+                continue
+            x = np.concatenate([[1.0], (profile.features[at[p]] - mean) / sd])
+            prior[design.player_column(i, "offense")] = x @ offense
+            prior[design.player_column(i, "defense")] = x @ defense
+        return prior
+
+    def save(self, path: Path | None = None, **about) -> Path:
+        """Write the regression, with whatever `about` says of how it was made."""
+        path = path or self.release_path(self.league)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        names = ("intercept", *FEATURES)
+        path.write_text(
+            json.dumps(
+                {
+                    "league": self.league,
+                    "features": FEATURES,
+                    "mean": dict(zip(FEATURES, self.mean)),
+                    "sd": dict(zip(FEATURES, self.sd)),
+                    "offense": dict(zip(names, self.offense)),
+                    "defense": dict(zip(names, self.defense)),
+                    **about,
+                },
+                indent=2,
+            )
+            + "\n"
+        )
+        return path
+
+    @classmethod
+    def load(cls, league: str, path: Path | None = None) -> "BoxModel":
+        path = path or cls.release_path(league)
+        raw = json.loads(path.read_text())
+        if tuple(raw["features"]) != FEATURES:
+            raise ValueError(f"{path} was learned on other features: {raw['features']}")
+        names = ("intercept", *FEATURES)
+        return cls(
+            raw["league"],
+            tuple(raw["mean"][f] for f in FEATURES),
+            tuple(raw["sd"][f] for f in FEATURES),
+            tuple(raw["offense"][n] for n in names),
+            tuple(raw["defense"][n] for n in names),
+        )
 
 
 def last_season_prior(
