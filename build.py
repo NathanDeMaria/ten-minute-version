@@ -42,6 +42,7 @@ from ten_minute_version.carryover import (
 from ten_minute_version.chain import (
     ChainSettings,
     PlayerState,
+    SeasonEnd,
     baseline_priors,
     carry,
     chained_priors,
@@ -1490,9 +1491,12 @@ def chain(
     box_sd: float = 2.97,
     drift_sd: float = 1.5,
     gap: int = 2,
-    team_penalty: float = 30.0,
+    team_penalty: float = 300.0,
     grow: bool = True,
     flat_sd: float = 0.0,
+    program: float = 1.0,
+    carry_home: bool = True,
+    write_ratings: bool = True,
     recruits: str = "./recruits",
     tables: str = "./stints",
     cache: str = CHAIN_WEEKS,
@@ -1502,12 +1506,23 @@ def chain(
     every season after `first`, each of its first `weeks` weeks' games
     predicted from a fit on the games before it, with their real lineups.
     `variant` "baseline" is every season alone, as `season_ratings` rates
-    it. Writes each prediction's error under `cache`, and -- the chain --
-    each season's ratings with their sds, chained_ratings.parquet next to
-    its tables; prints the errors by week against the baseline's, if run.
-    Run `chain_weeks` first (and `season_ratings`, for development).
+    it. `carry_home` starts each season at the last one's home edge, and
+    `program` each team at that much of its last column. Writes each
+    prediction's error under `cache`, and -- the chain, unless
+    `write_ratings` is off -- each season's ratings with their sds,
+    chained_ratings.parquet next to its tables; prints the errors by week
+    against the baseline's, if run. Run `chain_weeks` first (and
+    `season_ratings`, for development).
     """
-    settings = ChainSettings(box_sd, drift_sd, gap, team_penalty, grow, flat_sd)
+    settings = ChainSettings(
+        box_sd,
+        drift_sd,
+        gap,
+        team_penalty,
+        grow,
+        flat_sd,
+        program,
+    )
     ratings = _rating_tables(league, tables)
     grown = chain_development(ratings)
     found = read_recruits(recruits, league)
@@ -1520,6 +1535,7 @@ def chain(
         )
 
     states: dict[str, PlayerState] = {}
+    last_end = SeasonEnd()
     errors: list[dict] = []
     for season in range(first, last + 1):
         data = _load_chain_cache(cache, league, season)
@@ -1528,9 +1544,17 @@ def chain(
 
         def priors_for(box: np.ndarray, has: np.ndarray):
             if variant == "baseline":
-                return baseline_priors(design, box, settings)
+                return baseline_priors(design, box)
             return chained_priors(
-                design, season, states, newcomer, box, has, settings, grown
+                design,
+                season,
+                states,
+                newcomer,
+                box,
+                has,
+                settings,
+                grown,
+                last_end,
             )
 
         if season > first:
@@ -1560,7 +1584,11 @@ def chain(
         mean, pen = priors_for(data["box"], data["has_box"])
         w = rows.possessions.astype(float)
         b = solve(design, data["y"], w, pen, prior=mean)
-        if variant != "baseline":
+        last_end = SeasonEnd.of(design, b)
+        if not carry_home:
+            last_end = SeasonEnd(teams=last_end.teams)
+        # the last season's covariance is only for its ratings table
+        if variant != "baseline" and (write_ratings or season < last):
             cov = covariance(design, w, pen, settings.sigma)
             reported = Reported.build(rows, design)
             possessions = design.column_squares(w)
@@ -1578,7 +1606,8 @@ def chain(
                 / f"season={season}"
                 / "chained_ratings.parquet"
             )
-            pq.write_table(table, path, compression="zstd")
+            if write_ratings:
+                pq.write_table(table, path, compression="zstd")
     tag = (
         variant
         if variant == "baseline"
@@ -1586,6 +1615,8 @@ def chain(
             f"chain-box{box_sd:g}-drift{drift_sd:g}-gap{gap}-team{team_penalty:g}"
             + ("" if grow else "-nogrow")
             + (f"-flat{flat_sd:g}" if flat_sd else "")
+            + (f"-program{program:g}" if program else "")
+            + ("" if carry_home else "-nohome")
         )
     )
     path = Path(cache) / f"{league}-{tag}-errors.parquet"
