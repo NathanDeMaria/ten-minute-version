@@ -2,7 +2,7 @@ import numpy as np
 import pyarrow as pa
 
 from .context import GameContext, Team
-from .ratings import Design, Rows, game_margins, penalties, solve
+from .ratings import Design, Rows, game_margins, penalties, solve, targets
 
 
 def _team(team_id: str) -> Team:
@@ -127,3 +127,41 @@ def test_with_team_columns_a_rating_carries_a_fifth_of_its_teams():
     assert np.isclose(row["offense_vs_team"], 2.0)
     assert np.isclose(row["offense"], 2.0 + 5.0 / 5)
     assert row["team"] == "Home"
+
+
+def test_a_generic_sides_shooters_are_one_shooter():
+    """Generic shooters -- a different one every few shots -- who make a
+    fifth of their threes against Division I's two fifths are expected to
+    make fewer than the league, not shrunk each to its average."""
+    rng = np.random.default_rng(4)
+    games = [str(g) for g in range(1, 41)]
+    stints, shots = [], []
+    for g in games:
+        stints += [
+            (g, 1, "home", HOME, ["generic"], 10, 0),
+            (g, 1, "away", ["generic"], HOME, 10, 0),
+        ]
+        for i in range(30):
+            for side, shooter, rate in (
+                ("home", HOME[i % 5], 0.4),
+                ("away", f"x{g}-{i % 3}", 0.2),
+            ):
+                shots.append(
+                    {
+                        "game_id": g,
+                        "stint": 1,
+                        "offense_side": side,
+                        "shooter": shooter,
+                        "value": 3,
+                        "made": bool(rng.random() < rate),
+                        "shot_type": "JumpShot",
+                        "x": 25.0,
+                        "y": float(rng.uniform(22.0, 26.0)),
+                    }
+                )
+    contexts = {g: GameContext(g, False, False, _team("H"), _team("G")) for g in games}
+    rows = Rows.build(_stints(stints), contexts)
+    found = targets(rows, shots, set(games))
+    away = ~np.asarray(rows.offense_home)
+    expected, shooter = found.expected[3][away], found.shooter[3][away]
+    assert shooter.mean() < expected.mean() - 0.5
