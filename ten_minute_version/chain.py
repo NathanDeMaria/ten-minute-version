@@ -17,25 +17,41 @@ going in, mean and variance (`chained_priors`):
   he has a box score yet.
 
 At a season's end, every game fitted, each player's posterior (the dense
-covariance, `posterior.covariance`) is carried to the next (`carry`).
+covariance, `posterior.covariance`) is carried to the next (`carry`) --
+and so is what it leaves besides its players (`SeasonEnd`):
+
+- **the home edge**, which before a season's first game nothing else
+  sets: at zero, every week-0 prediction had no home edge (mens home
+  margins came out 6.7 points under, on average);
+- **each team's column**, its next season's prior mean (`program` of it),
+  at a tighter width than a season alone gives it (`team_penalty` 300, ~5
+  per 100 per side, against 30's ~17). Restarted at zero, a team's
+  strength carried only in its returners' fifths, so last season's strong
+  programs came out under all season; and nearly free, a team's first
+  games swung it too far (weeks 1-2 too extreme, slope +0.24 of the
+  error on the prediction). A returner already carries a fifth of his
+  team's column, so all of it counts that twice -- but all of it predicts
+  best: 0.75 is better at week 0 only.
 
 Tested week by week (`build.py chain`): each week's games predicted from a
 fit on the games before it, against the same with every season alone. In
 2014-2025 the chain is better at every week of the first ten (mens margin
-rmse 13.17 -> 12.61, womens 14.57 -> 13.78, weeks 1-10), and the
-per-player variances themselves -- against every prior at one width
-(`flat_sd`) -- earn most in the first two weeks, and the more of a game's
-minutes are newcomers', the more.
+rmse 13.17 -> 12.10, womens 14.57 -> 13.18, weeks 1-10; 12.60 and 13.74
+of that without the teams), and the per-player variances themselves --
+against every prior at one width (`flat_sd`) -- earn most in the first two
+weeks, and the more of a game's minutes are newcomers', the more.
 
-One season is a single level in this: a player who improves through his
-freshman season is rated at his average, and a narrow prior holds him near
-where he started. Tighter priors (less drift, narrower newcomers) help the
-first weeks and hurt the next preseason, which reads stale end-of-season
-ratings -- the sign that within-season change is missing.
+**Within a season** players change too, but not where it matters: by
+class, against returners, ranked newcomers improve no faster (-0.2 +- 0.3
+per 100 per 100 days, both sides together) and unranked ones a little
+(+0.8 +- 0.2 mens, +1.1 +- 0.2 womens) -- a few tenths of a point a game.
+Letting older games count less (an exponential forgetting factor, as a
+random-walk Kalman filter would) did nothing at a 120-day memory and hurt
+at 60.
 """
 
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import pyarrow as pa
@@ -56,10 +72,36 @@ class ChainSettings:
     box_sd: float = 2.97  # the box-score prior: what penalty 1000 means at SIGMA
     drift_sd: float = 1.5  # added per season since a player was last rated
     gap: int = 2  # seasons a player can miss and still carry his rating
-    team_penalty: float = 30.0
+    team_penalty: float = 300.0  # a team's column: ~5 per 100 per side
     development: bool = True
     flat_sd: float = 0.0  # >0: every carried and newcomer prior at this width instead
+    program: float = 1.0  # how much of a team's column its next season starts at
     sigma: float = SIGMA
+
+
+@dataclass(frozen=True)
+class SeasonEnd:
+    """What a season's end leaves the next besides its players, per
+    possession: the baseline, the home edge, and each team's (offense,
+    defense) columns."""
+
+    baseline: float = 0.0
+    home: float = 0.0
+    teams: Mapping[str, tuple[float, float]] = field(default_factory=dict)
+
+    @classmethod
+    def of(cls, design: Design, b: np.ndarray) -> "SeasonEnd":
+        return cls(
+            float(b[design.baseline]),
+            float(b[design.home]),
+            {
+                t: (
+                    float(b[design.team_column(j, "offense")]),
+                    float(b[design.team_column(j, "defense")]),
+                )
+                for j, t in enumerate(design.teams)
+            },
+        )
 
 
 @dataclass(frozen=True)
@@ -117,11 +159,10 @@ def development(
     }
 
 
-def baseline_priors(
-    design: Design, box: np.ndarray, settings: ChainSettings = ChainSettings()
-) -> tuple[np.ndarray, np.ndarray]:
-    """`season_ratings`' priors: every player at his box score, penalty 1000."""
-    return box.copy(), penalties(design, player=1000.0, team=settings.team_penalty)
+def baseline_priors(design: Design, box: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """`season_ratings`' priors: every player at his box score, penalty 1000,
+    and each team at penalty 30."""
+    return box.copy(), penalties(design, player=1000.0, team=30.0)
 
 
 def chained_priors(
@@ -133,13 +174,25 @@ def chained_priors(
     has_box: np.ndarray,
     settings: ChainSettings = ChainSettings(),
     grown: Mapping[int, tuple[float, float]] | None = None,
+    last: SeasonEnd = SeasonEnd(),
 ) -> tuple[np.ndarray, np.ndarray]:
     """(prior mean, penalty) for every column of `design` in `season`: see
     the module's docstring. `box` is the box-score prior from the games so
-    far and `has_box` which players have one; `grown` is `development`."""
+    far and `has_box` which players have one; `grown` is `development`;
+    `last` the last season's end. Its baseline and home edge are
+    unpenalised, so they're their prior only until a game touches them --
+    but before the first game, without them, every prediction is at no home
+    edge. A team starts at `program` of its last column: a returner carries
+    a fifth of it in his own rating, so all of it would count it twice."""
     players = len(design.players)
     pen = penalties(design, player=1000.0, team=settings.team_penalty)
     mean = np.zeros(design.columns)
+    mean[design.baseline], mean[design.home] = last.baseline, last.home
+    for j, t in enumerate(design.teams):
+        if t in last.teams:
+            o, d = last.teams[t]
+            mean[design.team_column(j, "offense")] = settings.program * o
+            mean[design.team_column(j, "defense")] = settings.program * d
     var = np.zeros(2 * players)
     box_var = (settings.box_sd / 100) ** 2
     drift = (settings.drift_sd / 100) ** 2
