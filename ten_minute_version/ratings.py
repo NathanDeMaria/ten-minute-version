@@ -25,13 +25,14 @@ Solved by conjugate gradient on the normal equations, with nothing but
 numpy: ~370,000 rows and ~10,000 ratings fit in seconds.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Mapping, Sequence
 
 import numpy as np
 import pyarrow as pa
 
 from .context import GameContext
+from .opponents import GENERIC
 from .shot_model import (
     Shots,
     choose_shrinkage,
@@ -305,6 +306,13 @@ def targets(rows: Rows, shot_rows: Sequence[Mapping], train_games: set[str]) -> 
             for s in shot_rows
         ]
     )
+    # A generic side's shooters are one shooter. Each takes a few shots
+    # against Division I all season, so alone he's shrunk to the average --
+    # Division I's, well above his -- and the targets would credit generic
+    # sides with ~3-4 points per 100 they never scored.
+    generic = np.array([r >= 0 and GENERIC in rows.offense[r] for r in row_of])
+    if generic.any():
+        shots = replace(shots, shooter=np.where(generic, GENERIC, shots.shooter))
     games = np.array([s["game_id"] for s in shot_rows], object)
     train = np.array([g in train_games for g in games]) & (row_of >= 0)
     model = fit_shot_model(shots.take(train))
