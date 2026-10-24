@@ -18,7 +18,11 @@ can be deconvolved from it (`NewcomerEstimate`, `NewcomerPrior.learn`):
   sd s exp(d score) with score = (101 - rank) / 100, a, b, s per side and
   the shape d shared by both. Width goes with the rank score rather than
   log rank so that no one rank -- the #1 pick, at log rank 0 -- gets a free
-  width of its own;
+  width of its own. Held out a season at a time, a line in log rank beats a
+  line in rank, a quadratic in log rank and a mean per rank band (1-5, 6-10,
+  11-25, 26-50, 51-100) for the mean. The width's form hardly matters: a
+  constant width, one per band and a line in log rank all come within a few
+  log-likelihood points of this one, so the data can't tell them apart;
 - unranked newcomers (walk-ons, transfers from outside Division I, players
   ESPN didn't rank): one mean and sd per side.
 
@@ -36,10 +40,11 @@ import json
 import math
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Callable, Sequence
+from typing import Sequence
 
 import numpy as np
 import pyarrow as pa
+from scipy.optimize import minimize
 
 from .recruiting import Recruit, features
 
@@ -80,42 +85,6 @@ NEWCOMER_SCHEMA = pa.schema(
 )
 
 
-def nelder_mead(
-    f: Callable[[np.ndarray], float],
-    start: Sequence[float],
-    step: float = 0.5,
-    iterations: int = 2000,
-) -> tuple[np.ndarray, float]:
-    """The minimum of `f` near `start`, by Nelder-Mead (numpy only)."""
-    n = len(start)
-    points = [np.array(start, float)] + [
-        np.array(start, float) + step * np.eye(n)[i] for i in range(n)
-    ]
-    values = [f(p) for p in points]
-    for _ in range(iterations):
-        order = np.argsort(values)
-        points, values = [points[i] for i in order], [values[i] for i in order]
-        centre = np.mean(points[:-1], axis=0)
-        reflected = centre + (centre - points[-1])
-        fr = f(reflected)
-        if fr < values[0]:
-            expanded = centre + 2 * (centre - points[-1])
-            fe = f(expanded)
-            points[-1], values[-1] = (expanded, fe) if fe < fr else (reflected, fr)
-        elif fr < values[-2]:
-            points[-1], values[-1] = reflected, fr
-        else:
-            contracted = centre + 0.5 * (points[-1] - centre)
-            fc = f(contracted)
-            if fc < values[-1]:
-                points[-1], values[-1] = contracted, fc
-            else:
-                points = [points[0] + 0.5 * (p - points[0]) for p in points]
-                values = [f(p) for p in points]
-    best = int(np.argmin(values))
-    return points[best], values[best]
-
-
 def normal_eb(x: np.ndarray, noise: np.ndarray) -> tuple[float, float]:
     """(mean, sd) of the talent behind estimates x, each with normal noise of
     variance `noise`: x ~ N(mean, sd^2 + noise), by maximum likelihood."""
@@ -124,7 +93,7 @@ def normal_eb(x: np.ndarray, noise: np.ndarray) -> tuple[float, float]:
         s2 = np.exp(2 * p[1]) + noise
         return float(0.5 * np.sum(np.log(s2) + (x - p[0]) ** 2 / s2))
 
-    (mean, log_sd), _ = nelder_mead(nll, [float(np.mean(x)), 0.5])
+    (mean, log_sd) = minimize(nll, [float(np.mean(x)), 0.5]).x
     return float(mean), float(np.exp(log_sd))
 
 
@@ -189,8 +158,7 @@ class NewcomerPrior:
                 total += 0.5 * np.sum(np.log(s2) + (x[s] - a - b * log_rank) ** 2 / s2)
             return float(total)
 
-        p, _ = nelder_mead(nll, [4.0, -0.7, 0.5, 4.0, -0.7, 0.0, 0.5], 0.3, 6000)
-        p, _ = nelder_mead(nll, list(p), 0.1, 6000)
+        p = minimize(nll, [4.0, -0.7, 0.5, 4.0, -0.7, 0.0, 0.5]).x
         unranked = [n for n in kept if n.rank is None]
         sides = []
         for i, (s, k) in enumerate(zip(SIDES, noise_scale)):
