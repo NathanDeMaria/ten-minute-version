@@ -18,6 +18,8 @@ in `ten_minute_version/releases/`.
 """
 
 import json
+import pickle
+import zlib
 from collections import Counter
 from collections.abc import Mapping
 from datetime import date, timedelta
@@ -37,6 +39,15 @@ from ten_minute_version.carryover import (
     game_terms,
     variants,
 )
+from ten_minute_version.chain import (
+    ChainSettings,
+    PlayerState,
+    baseline_priors,
+    carry,
+    chained_priors,
+    chained_table,
+)
+from ten_minute_version.chain import development as chain_development
 from ten_minute_version.context import context_table, read_context
 from ten_minute_version.estimate import Rules, nearest_action_floors, season_context
 from ten_minute_version.estimated import estimated_tables
@@ -50,13 +61,22 @@ from ten_minute_version.evaluate import (
     known_games,
 )
 from ten_minute_version.lineups import SIDES
+from ten_minute_version.newcomers import (
+    MAX_NOISE,
+    NEWCOMER_SCHEMA,
+    NewcomerEstimate,
+    NewcomerPrior,
+    normal_eb,
+)
 from ten_minute_version.opponents import (
+    GENERIC,
     Opponents,
     appearances,
     outside_side,
     schedules,
 )
 from ten_minute_version.plays import read_games
+from ten_minute_version.posterior import SIGMA, Reported, covariance, split_half
 from ten_minute_version.preseason import FEATURES as MINUTES_FEATURES
 from ten_minute_version.preseason import (
     History,
@@ -81,6 +101,7 @@ from ten_minute_version.ratings import (
     Design,
     Rows,
     cross_validate,
+    game_margins,
     penalties,
     ratings_table,
     solve,
@@ -1290,6 +1311,466 @@ def fit(league: str, seasons, root: str = "./plays", old_feed: bool = False):
             print(f"    {name:<26}{value:+.3f}")
 
 
+# Where `chain_weeks` caches each season for `chain` and `newcomer_fits`:
+# rebuildable, so not committed.
+CHAIN_WEEKS = "./chain-weeks"
+
+
+def _chain_cache(cache: str, league: str, season: int) -> Path:
+    return Path(cache) / f"league={league}" / f"season={season}.pkl"
+
+
+def _load_chain_cache(cache: str, league: str, season: int) -> dict | None:
+    path = _chain_cache(cache, league, season)
+    if not path.exists():
+        return None
+    with path.open("rb") as file:
+        return pickle.load(file)
+
+
+def calibrate(
+    league: str,
+    season: int = 2025,
+    side: str = "total",
+    prior: str = "half",
+    penalty: float = 1000,
+    team_penalty: float = 30,
+    target: str = "half on 3s and FTs",
+    summaries: str = "./summaries",
+    tables: str = "./stints",
+):
+    """
+    Are the ratings' posterior variances right? Fit two random halves of the
+    season's games apart -- each with targets and, `prior` "half", box-score
+    priors from its own games only ("none": no prior) -- and set how far
+    each player's two ratings (`side`: total, offense or defense) differ
+    against how far `posterior.split_half` says they should: observed over
+    predicted, 1 when calibrated.
+    """
+    built = _season_rows(league, season, summaries, tables, with_estimated=True)
+    assert built is not None, f"no tables for {league} {season}"
+    rows, shot_rows = built
+    design = Design.build(rows, teams=True)
+    games = sorted(set(rows.game_id))
+    in_a = {g for g in games if zlib.crc32(g.encode()) % 2 == 0}
+    halves = {"A": in_a, "B": set(games) - in_a}
+    half_a = np.array([g in in_a for g in rows.game_id])
+    fitted = {
+        h: TARGETS[target](targets(rows, shot_rows, g)) for h, g in halves.items()
+    }
+    if prior == "half":
+        box, lines = (
+            BoxModel.load(league),
+            list(read_box_lines(summaries, league, season)),
+        )
+        means = {h: box.prior(design, box_profile(lines, g)) for h, g in halves.items()}
+    else:
+        means = {h: np.zeros(design.columns) for h in halves}
+    found = split_half(
+        design,
+        Reported.build(rows, design),
+        rows.possessions.astype(float),
+        half_a,
+        fitted,
+        means,
+        penalties(design, player=penalty, team=team_penalty),
+        side,
+    )
+    before = {
+        r["athlete_id"] for r in _rating_tables(league, tables).get(season - 1, [])
+    }
+    new = np.array([p not in before for p in design.players])
+    seen = found.possessions > 0
+    print(
+        f"{league} {season}, {side}, prior {prior}, penalty {penalty:g}: observed / predicted"
+    )
+    print(f"    {'':22s} {'n':>5s} {'obs/pred':>8s} {'pred sd':>8s} {'obs sd':>7s}")
+    groups = [("all", seen)] + [
+        (
+            f"{lo}-{hi} possessions",
+            seen & (found.possessions >= lo) & (found.possessions < hi),
+        )
+        for lo, hi in ((0, 100), (100, 300), (300, 1000), (1000, 2000), (2000, 10**9))
+    ]
+    groups += [
+        ("newcomers 300+", seen & new & (found.possessions >= 300)),
+        ("returners 300+", seen & ~new & (found.possessions >= 300)),
+    ]
+    for name, g in groups:
+        if g.sum():
+            d2, pred = found.difference[g] ** 2, found.predicted[g]
+            print(
+                f"    {name:22s} {g.sum():5d} {d2.mean() / pred.mean():8.2f}"
+                f" {np.sqrt(pred.mean()):8.2f} {np.sqrt(d2.mean()):7.2f}"
+            )
+
+
+def chain_weeks(
+    league: str,
+    first: int = 2013,
+    last: int = 2025,
+    weeks: int = 16,
+    target: str = "half on 3s and FTs",
+    summaries: str = "./summaries",
+    tables: str = "./stints",
+    cache: str = CHAIN_WEEKS,
+):
+    """
+    Cache what `chain` and `newcomer_fits` read of each season: its rows and
+    design, the whole season's targets and box-score priors, and for each of
+    its first `weeks` weeks the games before it, the week's games, and the
+    targets and box-score priors from the games before it only. A few
+    minutes a season.
+    """
+    box = BoxModel.load(league)
+    for season in range(first, last + 1):
+        built = _season_rows(league, season, summaries, tables, with_estimated=True)
+        if built is None:
+            print(f"{league} {season}: not built, skipped")
+            continue
+        rows, shot_rows = built
+        design = Design.build(rows, teams=True)
+        directory = Path(tables) / f"league={league}" / f"season={season}"
+        day = {
+            r["game_id"]: r["date"]
+            for r in pq.read_table(directory / "games.parquet").to_pylist()
+        }
+        games = sorted(set(rows.game_id))
+        start = min(day[g] for g in games)
+        lines = list(read_box_lines(summaries, league, season))
+
+        def box_for(train: set[str]) -> tuple[np.ndarray, np.ndarray]:
+            profile = box_profile(lines, train)
+            seen = set(profile.players)
+            return box.prior(design, profile), np.array(
+                [p in seen for p in design.players]
+            )
+
+        found = []
+        for k in range(weeks + 1):
+            cut = start + timedelta(days=7 * k)
+            train = {g for g in games if day[g] < cut}
+            test = [g for g in games if cut <= day[g] < cut + timedelta(days=7)]
+            if not test:
+                break
+            if train:
+                y = TARGETS[target](targets(rows, shot_rows, train))
+                mean, has = box_for(train)
+            else:
+                y = np.zeros(len(rows))
+                mean, has = (
+                    np.zeros(design.columns),
+                    np.zeros(len(design.players), bool),
+                )
+            found.append(
+                {
+                    "cut": cut,
+                    "train": train,
+                    "test": test,
+                    "y": y.astype(np.float32),
+                    "box": mean,
+                    "has_box": has,
+                }
+            )
+        mean, has = box_for(set(games))
+        path = _chain_cache(cache, league, season)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("wb") as file:
+            pickle.dump(
+                {
+                    "rows": rows,
+                    "design": design,
+                    "day": day,
+                    "weeks": found,
+                    "y": TARGETS[target](targets(rows, shot_rows, set(games))),
+                    "box": mean,
+                    "has_box": has,
+                },
+                file,
+                protocol=5,
+            )
+        print(f"{league} {season}: {len(found)} weeks, wrote {path}", flush=True)
+
+
+def newcomer_fits(
+    league: str,
+    first: int = 2014,
+    last: int = 2025,
+    flat_sd: float = 30.0,
+    recruits: str = "./recruits",
+    tables: str = "./stints",
+    cache: str = CHAIN_WEEKS,
+):
+    """
+    Each season's newcomers -- never in a season's ratings before -- nearly
+    unshrunk: every game fitted with returners as `season_ratings` has them
+    (box score, penalty 1000) and newcomers at a flat prior (`flat_sd` per
+    100 a side, around 0, no box score), with each estimate's noise from the
+    posterior covariance. Writes newcomers.parquet next to the season's
+    tables, for `newcomer_prior`. Run `chain_weeks` first.
+    """
+    ratings = _rating_tables(league, tables)
+    found_recruits = read_recruits(recruits, league)
+    for season in range(first, last + 1):
+        data = _load_chain_cache(cache, league, season)
+        if data is None:
+            print(f"{league} {season}: no chain_weeks cache, skipped")
+            continue
+        rows, design = data["rows"], data["design"]
+        before = {
+            p
+            for s, found in ratings.items()
+            if s < season
+            for p in (r["athlete_id"] for r in found)
+        }
+        new = [p not in before and p != GENERIC for p in design.players]
+        pen = penalties(design, player=1000.0, team=30.0)
+        mean = data["box"].copy()
+        for i, is_new in enumerate(new):
+            if is_new:
+                pen[2 * i : 2 * i + 2] = SIGMA**2 / (flat_sd / 100) ** 2
+                mean[2 * i : 2 * i + 2] = 0.0
+        w = rows.possessions.astype(float)
+        b = solve(design, data["y"], w, pen, prior=mean)
+        cov = covariance(design, w, pen)
+        reported = Reported.build(rows, design)
+        offense, defense = reported.means(b)
+        var_offense, var_defense, both = reported.variances(cov)
+        del cov
+        possessions = design.column_squares(w)
+        out = []
+        for i, p in enumerate(design.players):
+            if not new[i]:
+                continue
+            recruit = found_recruits.get(p)
+            ranked = recruit is not None and recruit_features(recruit, season)[0] > 0
+            out.append(
+                {
+                    "season": season,
+                    "athlete_id": p,
+                    "rank": recruit.rank if recruit is not None and ranked else None,
+                    "possessions": possessions[2 * i],
+                    "offense": 100 * offense[i],
+                    "defense": 100 * defense[i],
+                    "var_offense": 1e4 * var_offense[i],
+                    "var_defense": 1e4 * var_defense[i],
+                    "cov": 1e4 * both[i],
+                }
+            )
+        path = (
+            Path(tables) / f"league={league}" / f"season={season}" / "newcomers.parquet"
+        )
+        pq.write_table(
+            pa.Table.from_pylist(out, schema=NEWCOMER_SCHEMA), path, compression="zstd"
+        )
+        print(f"{league} {season}: {len(out)} newcomers, wrote {path}", flush=True)
+
+
+def newcomer_prior(
+    league: str,
+    noise_offense: float = 1.0,
+    noise_defense: float = 1.0,
+    tables: str = "./stints",
+):
+    """
+    Learn what a newcomer is worth, and how sure, by his recruiting rank
+    (`newcomers.NewcomerPrior`) from every season's newcomers.parquet (run
+    `newcomer_fits` first), and write it to `releases/`: commit what this
+    changes. Each side's noise can be scaled by its `calibrate` result.
+    """
+    found = [
+        NewcomerEstimate(**r)
+        for path in sorted(
+            Path(tables).glob(f"league={league}/season=*/newcomers.parquet")
+        )
+        for r in pq.read_table(path).to_pylist()
+    ]
+    rank = np.array([n.rank or 0 for n in found])
+    total = np.array([n.offense + n.defense for n in found])
+    noise = np.array([n.var_offense + n.var_defense + 2 * n.cov for n in found])
+    print(
+        f"{league}: newcomers' first-season total per 100, talent with the noise taken out"
+    )
+    for name, lo, hi in (
+        ("1-5", 1, 5),
+        ("6-10", 6, 10),
+        ("11-25", 11, 25),
+        ("26-50", 26, 50),
+        ("51-100", 51, 100),
+        ("unranked", 0, 0),
+    ):
+        g = (rank >= lo) & (rank <= hi) & (noise < 2 * MAX_NOISE)
+        mean, sd = normal_eb(total[g], noise[g])
+        print(f"    {name:9s} {g.sum():6d}  mean {mean:+5.1f}  sd {sd:4.1f}")
+    model = NewcomerPrior.learn(league, found, (noise_offense, noise_defense))
+    path = model.save(
+        seasons=sorted({n.season for n in found}),
+        newcomers=len(found),
+        noise_scale={"offense": noise_offense, "defense": noise_defense},
+    )
+    print(f"wrote {path}")
+    for label, recruit in (
+        ("#1", 1),
+        ("#3", 3),
+        ("#10", 10),
+        ("#25", 25),
+        ("#50", 50),
+        ("#100", 100),
+        ("unranked", None),
+    ):
+        r = Recruit("", 0, recruit, 0) if recruit else None
+        (mo, vo), (md, vd) = model.side("offense", r, 0), model.side("defense", r, 0)
+        print(
+            f"    {label:9s} off {100 * mo:+5.1f} ± {100 * np.sqrt(vo):3.1f}"
+            f"  def {100 * md:+5.1f} ± {100 * np.sqrt(vd):3.1f}"
+        )
+
+
+def chain(
+    league: str,
+    variant: str = "chain",
+    first: int = 2013,
+    last: int = 2025,
+    weeks: int = 10,
+    box_sd: float = 2.97,
+    drift_sd: float = 1.5,
+    gap: int = 2,
+    team_penalty: float = 30.0,
+    grow: bool = True,
+    flat_sd: float = 0.0,
+    recruits: str = "./recruits",
+    tables: str = "./stints",
+    cache: str = CHAIN_WEEKS,
+):
+    """
+    Chained ratings (`ten_minute_version.chain`), tested week by week: in
+    every season after `first`, each of its first `weeks` weeks' games
+    predicted from a fit on the games before it, with their real lineups.
+    `variant` "baseline" is every season alone, as `season_ratings` rates
+    it. Writes each prediction's error under `cache`, and -- the chain --
+    each season's ratings with their sds, chained_ratings.parquet next to
+    its tables; prints the errors by week against the baseline's, if run.
+    Run `chain_weeks` first (and `season_ratings`, for development).
+    """
+    settings = ChainSettings(box_sd, drift_sd, gap, team_penalty, grow, flat_sd)
+    ratings = _rating_tables(league, tables)
+    grown = chain_development(ratings)
+    found = read_recruits(recruits, league)
+    newcomer_prior_ = NewcomerPrior.load(league)
+
+    def newcomer(p: str, season: int):
+        r = found.get(p)
+        return newcomer_prior_.side("offense", r, season), newcomer_prior_.side(
+            "defense", r, season
+        )
+
+    states: dict[str, PlayerState] = {}
+    errors: list[dict] = []
+    for season in range(first, last + 1):
+        data = _load_chain_cache(cache, league, season)
+        assert data is not None, f"no chain_weeks cache for {league} {season}"
+        rows, design = data["rows"], data["design"]
+
+        def priors_for(box: np.ndarray, has: np.ndarray):
+            if variant == "baseline":
+                return baseline_priors(design, box, settings)
+            return chained_priors(
+                design, season, states, newcomer, box, has, settings, grown
+            )
+
+        if season > first:
+            b = None
+            for k, week in enumerate(data["weeks"][: weeks + 1]):
+                mean, pen = priors_for(week["box"], week["has_box"])
+                train = np.array([g in week["train"] for g in rows.game_id])
+                b = solve(
+                    design,
+                    week["y"].astype(float),
+                    rows.possessions * train,
+                    pen,
+                    prior=mean,
+                    start=b,
+                )
+                games = np.array(week["test"], object)
+                predicted, actual = game_margins(rows, design.times(b), games)
+                errors += [
+                    {"season": season, "week": k, "game_id": g, "error": float(e)}
+                    for g, e in zip(games, predicted - actual)
+                ]
+            e = np.array([r["error"] for r in errors if r["season"] == season])
+            print(
+                f"{league} {season}: weeks 0-{weeks} rmse {np.sqrt(np.mean(e**2)):.3f}",
+                flush=True,
+            )
+        mean, pen = priors_for(data["box"], data["has_box"])
+        w = rows.possessions.astype(float)
+        b = solve(design, data["y"], w, pen, prior=mean)
+        if variant != "baseline":
+            cov = covariance(design, w, pen, settings.sigma)
+            reported = Reported.build(rows, design)
+            possessions = design.column_squares(w)
+            states = carry(design, reported, b, cov, possessions, season, states)
+            names = {
+                r["athlete_id"]: r["athlete_name"] for r in ratings.get(season, [])
+            }
+            table = chained_table(
+                league, season, design, reported, b, cov, possessions, names
+            )
+            del cov
+            path = (
+                Path(tables)
+                / f"league={league}"
+                / f"season={season}"
+                / "chained_ratings.parquet"
+            )
+            pq.write_table(table, path, compression="zstd")
+    tag = (
+        variant
+        if variant == "baseline"
+        else (
+            f"chain-box{box_sd:g}-drift{drift_sd:g}-gap{gap}-team{team_penalty:g}"
+            + ("" if grow else "-nogrow")
+            + (f"-flat{flat_sd:g}" if flat_sd else "")
+        )
+    )
+    path = Path(cache) / f"{league}-{tag}-errors.parquet"
+    pq.write_table(pa.Table.from_pylist(errors), path)
+    print(f"wrote {path}")
+    reference = Path(cache) / f"{league}-baseline-errors.parquet"
+    if variant != "baseline" and reference.exists():
+        _chain_summary(errors, pq.read_table(reference).to_pylist())
+
+
+def _chain_summary(errors: list[dict], baseline: list[dict]) -> None:
+    """Home-margin rmse by week of the season, and the paired t of the gap
+    to the baseline's on the same games."""
+    base = {(r["season"], r["week"], r["game_id"]): r["error"] for r in baseline}
+    print(f"    {'':10s} {'baseline':>9s} {'chain':>9s} {'t':>6s}")
+    for name, lo, hi in (
+        ("week 0", 0, 0),
+        ("weeks 1-2", 1, 2),
+        ("weeks 3-5", 3, 5),
+        ("weeks 6-10", 6, 10),
+        ("weeks 1-10", 1, 10),
+    ):
+        pairs = np.array(
+            [
+                (r["error"], base[(r["season"], r["week"], r["game_id"])])
+                for r in errors
+                if lo <= r["week"] <= hi
+                and (r["season"], r["week"], r["game_id"]) in base
+            ]
+        )
+        if not len(pairs):
+            continue
+        gap = pairs[:, 0] ** 2 - pairs[:, 1] ** 2
+        t = gap.mean() / (gap.std(ddof=1) / np.sqrt(len(gap)))
+        print(
+            f"    {name:10s} {np.sqrt(np.mean(pairs[:, 1] ** 2)):9.3f}"
+            f" {np.sqrt(np.mean(pairs[:, 0] ** 2)):9.3f} {t:+6.1f}"
+        )
+
+
 if __name__ == "__main__":
     Fire(
         {
@@ -1307,6 +1788,11 @@ if __name__ == "__main__":
             "estimated": estimated,
             "carryover": carryover,
             "carryovers": carryovers,
+            "calibrate": calibrate,
+            "chain_weeks": chain_weeks,
+            "newcomer_fits": newcomer_fits,
+            "newcomer_prior": newcomer_prior,
+            "chain": chain,
             "evaluate": evaluate,
             "fit": fit,
         }
