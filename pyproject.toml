@@ -12,6 +12,7 @@ dependencies = [
     # The on-floor probabilities: a logistic regression small enough to fit
     # with Newton steps, so numpy rather than a solver.
     "numpy>=2.3.0",
+    "scipy>=1.16",
 ]
 
 [dependency-groups]
