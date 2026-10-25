@@ -102,7 +102,6 @@ def test_flat_puts_every_prior_at_one_width():
 
 def test_carry_moves_who_played_and_counts_their_seasons():
     rows, design = _design()
-    reported = Reported.build(rows, design)
     b = np.zeros(design.columns)
     cov = np.eye(design.columns) * 1e-4
     possessions = design.column_squares(rows.possessions)
@@ -110,11 +109,24 @@ def test_carry_moves_who_played_and_counts_their_seasons():
         "old": PlayerState(2023, 0.0, 0.0, 1.0, 1.0, 2),
         "gone": PlayerState(2023, 0.1, 0.1, 1.0, 1.0, 1),
     }
-    out = carry(design, reported, b, cov, possessions, 2024, states)
+    out = carry(design, b, cov, possessions, 2024, states)
     assert out["old"].season == 2024 and out["old"].seasons == 3
     assert out["new"].seasons == 1
     assert out["gone"] == states["gone"]
-    assert np.isclose(out["old"].var_offense, 1e-4 * (1 + 1 / 25))
+    assert np.isclose(out["old"].var_offense, 1e-4)
+
+
+def test_carry_leaves_the_teams_fifth_to_the_teams_column():
+    rows, design = _design()
+    b = np.zeros(design.columns)
+    i = design.players.index("old")
+    b[design.player_column(i, "offense")] = 0.02
+    for j in range(len(design.teams)):
+        b[design.team_column(j, "offense")] = 0.05
+    cov = np.eye(design.columns) * 1e-4
+    possessions = design.column_squares(rows.possessions)
+    out = carry(design, b, cov, possessions, 2024, {})
+    assert np.isclose(out["old"].offense, 0.02)
 
 
 def test_development_is_the_average_change_by_seasons_before():

@@ -7,7 +7,7 @@ starter or a freshman. Here each player's prior is what's known of him
 going in, mean and variance (`chained_priors`):
 
 - **a returner** -- rated within the last `gap` seasons -- starts at his
-  last season's posterior (`posterior.Reported`), plus the average
+  last season's posterior for his own columns, plus the average
   development of players with as many seasons behind them
   (`development`), his variance widened by `drift_sd` per season since;
 - **a newcomer** starts at what his recruiting rank says
@@ -29,9 +29,16 @@ and so is what it leaves besides its players (`SeasonEnd`):
   strength carried only in its returners' fifths, so last season's strong
   programs came out under all season; and nearly free, a team's first
   games swung it too far (weeks 1-2 too extreme, slope +0.24 of the
-  error on the prediction). A returner already carries a fifth of his
-  team's column, so all of it counts that twice -- but all of it predicts
-  best: 0.75 is better at week 0 only.
+  error on the prediction). All of it predicts best (0.75 and 1.25 both
+  worse).
+
+A returner carries his own columns, not his rating as reported: that has a
+fifth of his team's column in it, which the team's carried column counts
+again. Carried twice, a strong program's returners came in too strong and
+a weak one's too weak: carrying the own columns, mens margin rmse goes
+14.36 -> 14.10 at week 0 and 12.055 -> 12.021 over weeks 1-10, womens
+16.44 -> 16.01 and 13.148 -> 13.102. (Taking the old team's fifth out for
+transfers alone does nothing: it's the players who stay.)
 
 Tested week by week (`build.py chain`): each week's games predicted from a
 fit on the games before it, against the same with every season alone. In
@@ -182,8 +189,7 @@ def chained_priors(
     `last` the last season's end. Its baseline and home edge are
     unpenalised, so they're their prior only until a game touches them --
     but before the first game, without them, every prediction is at no home
-    edge. A team starts at `program` of its last column: a returner carries
-    a fifth of it in his own rating, so all of it would count it twice."""
+    edge. A team starts at `program` of its last column."""
     players = len(design.players)
     pen = penalties(design, player=1000.0, team=settings.team_penalty)
     mean = np.zeros(design.columns)
@@ -222,7 +228,6 @@ def chained_priors(
 
 def carry(
     design: Design,
-    reported: Reported,
     b: np.ndarray,
     cov: np.ndarray,
     possessions: np.ndarray,
@@ -230,10 +235,13 @@ def carry(
     states: Mapping[str, PlayerState],
 ) -> dict[str, PlayerState]:
     """`states` with every player who had possessions in `season` (by
-    column, `Design.column_squares`) at his posterior from it."""
+    column, `Design.column_squares`) at his own columns' posterior from it:
+    without his team's fifth, which the team's carried column has."""
     out = dict(states)
-    offense, defense = reported.means(b)
-    var_offense, var_defense, _ = reported.variances(cov)
+    columns = 2 * len(design.players)
+    offense, defense = b[0:columns:2], b[1:columns:2]
+    square = np.diagonal(cov)
+    var_offense, var_defense = square[0:columns:2], square[1:columns:2]
     for i, p in enumerate(design.players):
         if possessions[2 * i] <= 0 and possessions[2 * i + 1] <= 0:
             continue

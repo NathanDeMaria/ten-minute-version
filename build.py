@@ -1737,7 +1737,7 @@ def chain(
             cov = covariance(design, w, pen, settings.sigma)
             reported = Reported.build(rows, design)
             possessions = design.column_squares(w)
-            states = carry(design, reported, b, cov, possessions, season, states)
+            states = carry(design, b, cov, possessions, season, states)
             names = {
                 r["athlete_id"]: r["athlete_name"] for r in ratings.get(season, [])
             }
