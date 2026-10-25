@@ -109,7 +109,7 @@ def test_carry_moves_who_played_and_counts_their_seasons():
         "old": PlayerState(2023, 0.0, 0.0, 1.0, 1.0, 2),
         "gone": PlayerState(2023, 0.1, 0.1, 1.0, 1.0, 1),
     }
-    out = carry(design, b, cov, possessions, 2024, states)
+    out = carry(design, b, np.diagonal(cov), possessions, 2024, states)
     assert out["old"].season == 2024 and out["old"].seasons == 3
     assert out["new"].seasons == 1
     assert out["gone"] == states["gone"]
@@ -125,7 +125,7 @@ def test_carry_leaves_the_teams_fifth_to_the_teams_column():
         b[design.team_column(j, "offense")] = 0.05
     cov = np.eye(design.columns) * 1e-4
     possessions = design.column_squares(rows.possessions)
-    out = carry(design, b, cov, possessions, 2024, {})
+    out = carry(design, b, np.diagonal(cov), possessions, 2024, {})
     assert np.isclose(out["old"].offense, 0.02)
 
 

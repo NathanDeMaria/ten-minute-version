@@ -29,29 +29,18 @@ from dataclasses import dataclass
 from typing import Mapping
 
 import numpy as np
+from scipy import sparse
+from scipy.linalg import get_lapack_funcs
 
 from .ratings import Design, Rows
 
 SIGMA = 0.94  # points per possession, the residual sd either league fits to
 
 
-def gram(design: Design, weight: np.ndarray, chunk: int = 30_000_000) -> np.ndarray:
-    """X'WX, dense: every pair of a row's entries, summed by bincount."""
-    columns = design.columns
-    starts = np.searchsorted(design.row, np.arange(design.rows))
-    counts = np.bincount(design.row, minlength=design.rows)
-    out = np.zeros(columns * columns)
-    for k in np.unique(counts):
-        if k == 0:
-            continue
-        rows = np.nonzero(counts == k)[0]
-        for part in np.array_split(rows, max(1, len(rows) * k * k // chunk + 1)):
-            at = starts[part][:, None] + np.arange(k)
-            cols, vals = design.col[at], design.val[at]
-            flat = (cols[:, :, None] * columns + cols[:, None, :]).ravel()
-            products = vals[:, :, None] * vals[:, None, :] * weight[part][:, None, None]
-            out += np.bincount(flat, weights=products.ravel(), minlength=columns**2)
-    return out.reshape(columns, columns)
+def gram(design: Design, weight: np.ndarray) -> np.ndarray:
+    """X'WX, dense, from the sparse design."""
+    x = design.matrix
+    return (x.T @ sparse.diags(weight) @ x).toarray()
 
 
 def precision(normal: np.ndarray, penalty: np.ndarray) -> np.ndarray:
@@ -63,11 +52,43 @@ def precision(normal: np.ndarray, penalty: np.ndarray) -> np.ndarray:
     return out
 
 
+def spd_inverse(a: np.ndarray) -> np.ndarray:
+    """The inverse of a symmetric positive definite matrix, by its Cholesky
+    factor (LAPACK potrf/potri): a third of a general inverse's work."""
+    potrf, potri = get_lapack_funcs(("potrf", "potri"), (a,))
+    factor, info = potrf(a, lower=True, clean=True, overwrite_a=True)
+    if info != 0:
+        raise np.linalg.LinAlgError(f"not positive definite (potrf {info})")
+    inverse, info = potri(factor, lower=True, overwrite_c=True)
+    if info != 0:
+        raise np.linalg.LinAlgError(f"singular (potri {info})")
+    # potri fills the lower triangle only
+    return np.tril(inverse) + np.tril(inverse, -1).T
+
+
+def variances(
+    design: Design, weight: np.ndarray, penalty: np.ndarray, sigma: float = SIGMA
+) -> np.ndarray:
+    """The posterior variance of every column -- `covariance`'s diagonal --
+    without the rest of it: the column norms of the inverse Cholesky factor,
+    two thirds of the work."""
+    a = precision(gram(design, weight), penalty)
+    potrf, trtri = get_lapack_funcs(("potrf", "trtri"), (a,))
+    factor, info = potrf(a, lower=True, clean=True, overwrite_a=True)
+    if info != 0:
+        raise np.linalg.LinAlgError(f"not positive definite (potrf {info})")
+    inverse, info = trtri(factor, lower=True, overwrite_c=True)
+    if info != 0:
+        raise np.linalg.LinAlgError(f"singular (trtri {info})")
+    # A^-1 = L^-T L^-1, so its diagonal is each column of L^-1 squared, summed
+    return sigma**2 * np.einsum("ij,ij->j", inverse, inverse)
+
+
 def covariance(
     design: Design, weight: np.ndarray, penalty: np.ndarray, sigma: float = SIGMA
 ) -> np.ndarray:
     """The posterior covariance of every column, per possession squared."""
-    return sigma**2 * np.linalg.inv(precision(gram(design, weight), penalty))
+    return sigma**2 * spd_inverse(precision(gram(design, weight), penalty))
 
 
 def residual_variance(
@@ -83,27 +104,33 @@ def main_teams(rows: Rows, design: Design) -> np.ndarray:
     """Each player's team -- the one he was on the floor for most, as
     `ratings_table` picks it -- as its offense column, or -1 if the design
     has no column for it."""
-    on: dict[str, dict[str, float]] = {}
-    for i in range(len(rows)):
-        n = rows.possessions[i]
-        for five, weights, team in (
-            (rows.offense[i], rows.offense_weights[i], rows.offense_team[i]),
-            (rows.defense[i], rows.defense_weights[i], rows.defense_team[i]),
-        ):
-            if not team:
-                continue
-            for p, w in zip(five, weights):
-                by_team = on.setdefault(p, {})
-                by_team[team] = by_team.get(team, 0.0) + w * n
+    # every player entry of the design, with the team it's on the floor for
+    # (teams coded once per row: string arrays are slow to index and sort)
+    names = sorted({t for t in (*rows.offense_team, *rows.defense_team) if t})
+    code = {t: i for i, t in enumerate(names)}
+    offense = np.array([code.get(t, -1) for t in rows.offense_team])
+    defense = np.array([code.get(t, -1) for t in rows.defense_team])
+    entry = design.col < 2 * len(design.players)
+    row, col = design.row[entry], design.col[entry]
+    player, defending = col // 2, col % 2 == 1
+    team = np.where(defending, defense[row], offense[row])
+    on = team >= 0
+    player, team_code = player[on], team[on]
+    weight = (np.abs(design.val[entry]) * rows.possessions[row])[on]
+    # each (player, team)'s possessions, then each player's most -- ties to
+    # the later team id, as max over (possessions, team) has it
+    pair = player * len(names) + team_code
+    pairs, at = np.unique(pair, return_inverse=True)
+    total = np.bincount(at, weights=weight)
+    by_player, by_team = pairs // len(names), pairs % len(names)
+    order = np.lexsort((by_team, total, by_player))
+    last = np.r_[by_player[order][1:] != by_player[order][:-1], True]
     team_at = {t: i for i, t in enumerate(design.teams)}
     out = np.full(len(design.players), -1)
-    for i, p in enumerate(design.players):
-        teams = on.get(p)
-        if not teams:
-            continue
-        team = max(teams, key=lambda t: (teams[t], t))
-        if team in team_at:
-            out[i] = design.team_column(team_at[team], "offense")
+    for p, t in zip(by_player[order][last], by_team[order][last]):
+        j = team_at.get(names[t])
+        if j is not None:
+            out[p] = design.team_column(j, "offense")
     return out
 
 

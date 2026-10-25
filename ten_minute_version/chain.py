@@ -229,18 +229,19 @@ def chained_priors(
 def carry(
     design: Design,
     b: np.ndarray,
-    cov: np.ndarray,
+    square: np.ndarray,
     possessions: np.ndarray,
     season: int,
     states: Mapping[str, PlayerState],
 ) -> dict[str, PlayerState]:
     """`states` with every player who had possessions in `season` (by
     column, `Design.column_squares`) at his own columns' posterior from it:
-    without his team's fifth, which the team's carried column has."""
+    without his team's fifth, which the team's carried column has.
+    `square` is every column's posterior variance (`posterior.variances`,
+    or the covariance's diagonal)."""
     out = dict(states)
     columns = 2 * len(design.players)
     offense, defense = b[0:columns:2], b[1:columns:2]
-    square = np.diagonal(cov)
     var_offense, var_defense = square[0:columns:2], square[1:columns:2]
     for i, p in enumerate(design.players):
         if possessions[2 * i] <= 0 and possessions[2 * i + 1] <= 0:
