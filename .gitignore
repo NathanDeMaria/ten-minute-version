@@ -19,3 +19,4 @@ recruits/
 chain-weeks/
 # ...and ESPN's roster responses (`make rosters`)
 rosters/
+/team-ratings/

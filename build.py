@@ -21,13 +21,15 @@ import json
 import pickle
 import zlib
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Callable, Iterator, Mapping
+from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.compute  # noqa: F401  (pa.compute)
+import pyarrow.csv
 import pyarrow.parquet as pq
 from fire import Fire
 
@@ -128,6 +130,12 @@ from ten_minute_version.rosters import current as roster_current
 from ten_minute_version.rosters import fetch as fetch_roster
 from ten_minute_version.rosters import roster_rows, roster_table
 from ten_minute_version.stints import season_tables
+from ten_minute_version.team_ratings import (
+    TEAM_RATING_SCHEMA,
+    Floor,
+    shrunk_pace,
+    team_rating_rows,
+)
 
 
 def stints(
@@ -1634,6 +1642,112 @@ def newcomer_prior(
         )
 
 
+@dataclass(frozen=True)
+class _WeekFit:
+    """One week's fit in the chain: `b` from the games before its cut,
+    `train` which of the season's rows those are; `data` is the season's
+    `chain_weeks` cache."""
+
+    season: int
+    week: int
+    train: np.ndarray
+    b: np.ndarray
+    data: dict
+
+
+def _chain_fits(
+    league: str,
+    settings: ChainSettings,
+    first: int,
+    last: int,
+    weeks: int,
+    recruits: str,
+    tables: str,
+    cache: str,
+    *,
+    baseline: bool = False,
+    carry_home: bool = True,
+    at_end: Callable[[int, dict, np.ndarray, np.ndarray, np.ndarray], np.ndarray]
+    | None = None,
+) -> Iterator[_WeekFit]:
+    """
+    The chain (`ten_minute_version.chain`), fitted week by week: every
+    season after `first`, its first `weeks` weeks' fits, each on the games
+    before it, then the season's end fit carried to the next. `baseline`
+    rates every season alone instead. `at_end(season, data, b, penalty,
+    weights)`, if given, sees each end fit and returns its columns'
+    posterior variances; otherwise only those are computed.
+    """
+    grown = chain_development(_rating_tables(league, tables))
+    found = read_recruits(recruits, league)
+    newcomer_prior_ = NewcomerPrior.load(league)
+
+    def newcomer(p: str, season: int):
+        r = found.get(p)
+        return newcomer_prior_.side("offense", r, season), newcomer_prior_.side(
+            "defense", r, season
+        )
+
+    states: dict[str, PlayerState] = {}
+    last_end = SeasonEnd()
+    for season in range(first, last + 1):
+        data = _load_chain_cache(cache, league, season)
+        assert data is not None, f"no chain_weeks cache for {league} {season}"
+        rows, design = data["rows"], data["design"]
+
+        def priors_for(box: np.ndarray, has: np.ndarray, end: bool = False):
+            if baseline:
+                return baseline_priors(design, box)
+            return chained_priors(
+                design,
+                season,
+                states,
+                newcomer,
+                box,
+                has,
+                settings,
+                grown,
+                last_end,
+                end,
+            )
+
+        if season > first:
+            b = None
+            # each week's games are the last week's and more: its X'WX is
+            # the last week's plus the new rows'
+            normal, before = None, np.zeros(len(rows), bool)
+            for k, week in enumerate(data["weeks"][: weeks + 1]):
+                mean, pen = priors_for(week["box"], week["has_box"])
+                train = np.array([g in week["train"] for g in rows.game_id])
+                added = weighted_gram(design, rows.possessions * (train & ~before))
+                normal = added if normal is None else normal + added
+                before = train
+                b = solve(
+                    design,
+                    week["y"].astype(float),
+                    rows.possessions * train,
+                    pen,
+                    prior=mean,
+                    start=b,
+                    normal=normal,
+                )
+                yield _WeekFit(season, k, train, b, data)
+        mean, pen = priors_for(data["box"], data["has_box"], end=True)
+        w = rows.possessions.astype(float)
+        b = solve(design, data["y"], w, pen, prior=mean)
+        last_end = SeasonEnd.of(design, b)
+        if not carry_home:
+            last_end = SeasonEnd(teams=last_end.teams)
+        # the last season's covariance is only for its ratings table
+        if not baseline and (at_end is not None or season < last):
+            if at_end is not None:
+                square = at_end(season, data, b, pen, w)
+            else:
+                # carrying needs only each column's variance
+                square = variances(design, w, pen, settings.sigma)
+            states = carry(design, b, square, design.column_squares(w), season, states)
+
+
 def chain(
     league: str,
     variant: str = "chain",
@@ -1680,102 +1794,64 @@ def chain(
         program=program,
     )
     ratings = _rating_tables(league, tables)
-    grown = chain_development(ratings)
-    found = read_recruits(recruits, league)
-    newcomer_prior_ = NewcomerPrior.load(league)
-
-    def newcomer(p: str, season: int):
-        r = found.get(p)
-        return newcomer_prior_.side("offense", r, season), newcomer_prior_.side(
-            "defense", r, season
-        )
-
-    states: dict[str, PlayerState] = {}
-    last_end = SeasonEnd()
     errors: list[dict] = []
-    for season in range(first, last + 1):
-        data = _load_chain_cache(cache, league, season)
-        assert data is not None, f"no chain_weeks cache for {league} {season}"
+
+    def write_table(season, data, b, pen, w) -> np.ndarray:
+        """The season's chained_ratings.parquet; its covariance's diagonal."""
         rows, design = data["rows"], data["design"]
+        cov = covariance(design, w, pen, settings.sigma)
+        square = np.diagonal(cov).copy()
+        reported = Reported.build(rows, design)
+        names = {r["athlete_id"]: r["athlete_name"] for r in ratings.get(season, [])}
+        possessions = design.column_squares(w)
+        table = chained_table(
+            league, season, design, reported, b, cov, possessions, names
+        )
+        del cov
+        path = (
+            Path(tables)
+            / f"league={league}"
+            / f"season={season}"
+            / "chained_ratings.parquet"
+        )
+        pq.write_table(table, path, compression="zstd")
+        return square
 
-        def priors_for(box: np.ndarray, has: np.ndarray, end: bool = False):
-            if variant == "baseline":
-                return baseline_priors(design, box)
-            return chained_priors(
-                design,
-                season,
-                states,
-                newcomer,
-                box,
-                has,
-                settings,
-                grown,
-                last_end,
-                end,
-            )
-
-        if season > first:
-            b = None
-            # each week's games are the last week's and more: its X'WX is
-            # the last week's plus the new rows'
-            normal, before = None, np.zeros(len(rows), bool)
-            for k, week in enumerate(data["weeks"][: weeks + 1]):
-                mean, pen = priors_for(week["box"], week["has_box"])
-                train = np.array([g in week["train"] for g in rows.game_id])
-                added = weighted_gram(design, rows.possessions * (train & ~before))
-                normal = added if normal is None else normal + added
-                before = train
-                b = solve(
-                    design,
-                    week["y"].astype(float),
-                    rows.possessions * train,
-                    pen,
-                    prior=mean,
-                    start=b,
-                    normal=normal,
-                )
-                games = np.array(week["test"], object)
-                predicted, actual = game_margins(rows, design.times(b), games)
-                errors += [
-                    {"season": season, "week": k, "game_id": g, "error": float(e)}
-                    for g, e in zip(games, predicted - actual)
-                ]
-            e = np.array([r["error"] for r in errors if r["season"] == season])
+    def season_done(season: int) -> None:
+        e = np.array([r["error"] for r in errors if r["season"] == season])
+        if len(e):
             print(
                 f"{league} {season}: weeks 0-{weeks} rmse {np.sqrt(np.mean(e**2)):.3f}",
                 flush=True,
             )
-        mean, pen = priors_for(data["box"], data["has_box"], end=True)
-        w = rows.possessions.astype(float)
-        b = solve(design, data["y"], w, pen, prior=mean)
-        last_end = SeasonEnd.of(design, b)
-        if not carry_home:
-            last_end = SeasonEnd(teams=last_end.teams)
-        # the last season's covariance is only for its ratings table
-        if variant != "baseline" and (write_ratings or season < last):
-            possessions = design.column_squares(w)
-            if write_ratings:
-                cov = covariance(design, w, pen, settings.sigma)
-                square = np.diagonal(cov).copy()
-                reported = Reported.build(rows, design)
-                names = {
-                    r["athlete_id"]: r["athlete_name"] for r in ratings.get(season, [])
-                }
-                table = chained_table(
-                    league, season, design, reported, b, cov, possessions, names
-                )
-                del cov
-                path = (
-                    Path(tables)
-                    / f"league={league}"
-                    / f"season={season}"
-                    / "chained_ratings.parquet"
-                )
-                pq.write_table(table, path, compression="zstd")
-            else:
-                # carrying needs only each column's variance
-                square = variances(design, w, pen, settings.sigma)
-            states = carry(design, b, square, possessions, season, states)
+
+    current = None
+    for fit in _chain_fits(
+        league,
+        settings,
+        first,
+        last,
+        weeks,
+        recruits,
+        tables,
+        cache,
+        baseline=variant == "baseline",
+        carry_home=carry_home,
+        at_end=write_table if write_ratings and variant != "baseline" else None,
+    ):
+        if fit.season != current:
+            if current is not None:
+                season_done(current)
+            current = fit.season
+        rows, design = fit.data["rows"], fit.data["design"]
+        games = np.array(fit.data["weeks"][fit.week]["test"], object)
+        predicted, actual = game_margins(rows, design.times(fit.b), games)
+        errors += [
+            {"season": fit.season, "week": fit.week, "game_id": g, "error": float(e)}
+            for g, e in zip(games, predicted - actual)
+        ]
+    if current is not None:
+        season_done(current)
     tag = (
         variant
         if variant == "baseline"
@@ -1794,6 +1870,99 @@ def chain(
     reference = Path(cache) / f"{league}-baseline-errors.parquet"
     if variant != "baseline" and reference.exists():
         _chain_summary(errors, pq.read_table(reference).to_pylist())
+
+
+def team_ratings(
+    league: str,
+    first: int = 2013,
+    last: int = 2025,
+    weeks: int = 24,
+    recruits: str = "./recruits",
+    summaries: str = "./summaries",
+    tables: str = "./stints",
+    cache: str = CHAIN_WEEKS,
+    out: str = "./team-ratings",
+):
+    """
+    Every team's rating as of each week's cut in every season after
+    `first` (`ten_minute_version.team_ratings`), from the chain's weekly
+    fits: `{out}/{league}_player_ratings.csv`, the file Cassandra's mens
+    and womens models read. Run `chain_weeks` with at least `weeks` weeks
+    first, so the cuts reach the season's end. Each season's week-0 shares
+    are projected by a minutes model learned on the seasons before it.
+    """
+    spells = _spells(league, tables)
+    history = _histories(league, tables, spells, read_recruits(recruits, league))
+    histories = {season: history(season) for season in spells}
+    examples = _minutes_examples(spells, histories)
+
+    def projected_shares(season: int) -> dict[str, dict[str, float]]:
+        if season not in spells:
+            return {}
+        before = [s for s in examples if s < season] or [
+            s for s in examples if s != season
+        ]
+        model = MinutesModel.learn(
+            np.vstack([examples[s][0] for s in before]),
+            np.concatenate([examples[s][1] for s in before]),
+        )
+        players = season_roster(spells[season])
+        x = np.array(
+            [minutes_features(p, t, season, histories[season]) for p, t in players]
+        )
+        projected: dict[str, dict[str, float]] = {}
+        for (player, team), share in model.project(players, x).items():
+            projected.setdefault(team, {})[player] = share
+        return projected
+
+    def team_names(season: int) -> dict[str, str | None]:
+        return {
+            c.team(side).team_id: c.team(side).name
+            for c in read_context(summaries, league, season).values()
+            for side in ("home", "away")
+        }
+
+    found: list[dict] = []
+    floor: Floor | None = None
+    last_pace: dict[str, float] = {}
+    projected: dict[str, dict[str, float]] = {}
+    names: dict[str, str | None] = {}
+    for fit in _chain_fits(
+        league, ChainSettings(), first, last, weeks, recruits, tables, cache
+    ):
+        if fit.week == 0:
+            if floor is None:
+                before = _load_chain_cache(cache, league, fit.season - 1)
+                floor = Floor.build(before["rows"]) if before else None
+            if floor is not None:
+                last_pace = floor.pace(np.ones(len(floor.rows), bool))
+            floor = Floor.build(fit.data["rows"])
+            projected = projected_shares(fit.season)
+            names = team_names(fit.season)
+        assert floor is not None
+        pace = floor.pace(fit.train)
+        games = floor.games(fit.train)
+        typical = float(np.mean(list((pace or last_pace or {"": 68.0}).values())))
+        cut = fit.data["weeks"][fit.week]["cut"]
+        found += team_rating_rows(
+            league,
+            fit.season,
+            cut,
+            fit.data["design"],
+            fit.b,
+            floor.teams,
+            floor.shares(fit.train),
+            projected,
+            shrunk_pace(pace, games, last_pace, typical, floor.teams),
+            games,
+            names,
+        )
+        if fit.week == 0:
+            print(f"{league} {fit.season}: {len(floor.teams)} teams", flush=True)
+    path = Path(out) / f"{league}_player_ratings.csv"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pyarrow.csv.write_csv(pa.Table.from_pylist(found, TEAM_RATING_SCHEMA), path)
+    print(f"wrote {path}: {len(found)} rows")
 
 
 def _chain_summary(errors: list[dict], baseline: list[dict]) -> None:
@@ -1848,6 +2017,7 @@ if __name__ == "__main__":
             "newcomer_fits": newcomer_fits,
             "newcomer_prior": newcomer_prior,
             "chain": chain,
+            "team_ratings": team_ratings,
             "evaluate": evaluate,
             "fit": fit,
         }
