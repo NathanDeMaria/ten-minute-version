@@ -9,7 +9,9 @@ going in, mean and variance (`chained_priors`):
 - **a returner** -- rated within the last `gap` seasons -- starts at his
   last season's posterior for his own columns, plus the average
   development of players with as many seasons behind them
-  (`development`), his variance widened by `drift_sd` per season since;
+  (`development`), his variance widened per season since: by
+  `week_drift_sd` in the weekly fits before a season's end, by `drift_sd`
+  in the end's fit, the one carried;
 - **a newcomer** starts at what his recruiting rank says
   (`newcomers.NewcomerPrior`), mean and width;
 - either is then combined, by precision, with the box-score prior from the
@@ -39,6 +41,20 @@ a weak one's too weak: carrying the own columns, mens margin rmse goes
 14.36 -> 14.10 at week 0 and 12.055 -> 12.021 over weeks 1-10, womens
 16.44 -> 16.01 and 13.148 -> 13.102. (Taking the old team's fifth out for
 transfers alone does nothing: it's the players who stay.)
+
+The two drifts differ because the two fits do different jobs. Week 0's
+predictions are the carried end-of-season fit's alone, and want it loose
+(drift 1.5): at 0.75 there, mens week-0 rmse goes 14.10 -> 14.13 and womens
+16.01 -> 16.10. Each later week's fit, a few games on top of that, wants its
+returners held tighter: anything that does -- less drift, a larger sigma,
+narrower newcomers -- helps weeks 1-10 and, applied to the end's fit too,
+hurts week 0. Split, week 0 is untouched, and weekly drift 0.5, 0.75 and
+1.0 take mens weeks 1-10 from 12.021 to 12.005, 12.007 and 12.010 (t
+-11 to -13), womens 0.75, 1.0 and 1.25 from 13.102 to 13.089, 13.092 and
+13.096 (t -8 to -10), most of it in weeks 1-2. Nothing else moved off its
+setting, both leagues: box_sd 2.5 and 3.5, gap 1 and 3, team_penalty 150
+and 600, sigma 0.8 and 1.1 at every fit, and newcomer variances halved or
+doubled are all flat or worse over weeks 1-10.
 
 Tested week by week (`build.py chain`): each week's games predicted from a
 fit on the games before it, against the same with every season alone. In
@@ -77,7 +93,8 @@ class ChainSettings:
     """Per side, per 100 possessions where they're widths."""
 
     box_sd: float = 2.97  # the box-score prior: what penalty 1000 means at SIGMA
-    drift_sd: float = 1.5  # added per season since a player was last rated
+    drift_sd: float = 1.5  # added per season since a player was last rated, at the end
+    week_drift_sd: float = 0.75  # the same, in the weekly fits before it
     gap: int = 2  # seasons a player can miss and still carry his rating
     team_penalty: float = 300.0  # a team's column: ~5 per 100 per side
     development: bool = True
@@ -182,6 +199,7 @@ def chained_priors(
     settings: ChainSettings = ChainSettings(),
     grown: Mapping[int, tuple[float, float]] | None = None,
     last: SeasonEnd = SeasonEnd(),
+    end: bool = False,
 ) -> tuple[np.ndarray, np.ndarray]:
     """(prior mean, penalty) for every column of `design` in `season`: see
     the module's docstring. `box` is the box-score prior from the games so
@@ -189,7 +207,9 @@ def chained_priors(
     `last` the last season's end. Its baseline and home edge are
     unpenalised, so they're their prior only until a game touches them --
     but before the first game, without them, every prediction is at no home
-    edge. A team starts at `program` of its last column."""
+    edge. A team starts at `program` of its last column. `end` is the
+    season-end fit, the one carried: its returners drift by `drift_sd`,
+    the weekly fits' by `week_drift_sd`."""
     players = len(design.players)
     pen = penalties(design, player=1000.0, team=settings.team_penalty)
     mean = np.zeros(design.columns)
@@ -201,7 +221,7 @@ def chained_priors(
             mean[design.team_column(j, "defense")] = settings.program * d
     var = np.zeros(2 * players)
     box_var = (settings.box_sd / 100) ** 2
-    drift = (settings.drift_sd / 100) ** 2
+    drift = ((settings.drift_sd if end else settings.week_drift_sd) / 100) ** 2
     for i, p in enumerate(design.players):
         o, d = 2 * i, 2 * i + 1
         state = states.get(p)

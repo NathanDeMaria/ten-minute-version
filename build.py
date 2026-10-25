@@ -1642,6 +1642,7 @@ def chain(
     weeks: int = 10,
     box_sd: float = 2.97,
     drift_sd: float = 1.5,
+    week_drift_sd: float = 0.75,
     gap: int = 2,
     team_penalty: float = 300.0,
     grow: bool = True,
@@ -1659,7 +1660,9 @@ def chain(
     predicted from a fit on the games before it, with their real lineups.
     `variant` "baseline" is every season alone, as `season_ratings` rates
     it. `carry_home` starts each season at the last one's home edge, and
-    `program` each team at that much of its last column. Writes each
+    `program` each team at that much of its last column; returners drift
+    `week_drift_sd` per season in the weekly fits, `drift_sd` in the
+    season-end fit that's carried. Writes each
     prediction's error under `cache`, and -- the chain, unless
     `write_ratings` is off -- each season's ratings with their sds,
     chained_ratings.parquet next to its tables; prints the errors by week
@@ -1667,13 +1670,14 @@ def chain(
     `season_ratings`, for development).
     """
     settings = ChainSettings(
-        box_sd,
-        drift_sd,
-        gap,
-        team_penalty,
-        grow,
-        flat_sd,
-        program,
+        box_sd=box_sd,
+        drift_sd=drift_sd,
+        week_drift_sd=week_drift_sd,
+        gap=gap,
+        team_penalty=team_penalty,
+        development=grow,
+        flat_sd=flat_sd,
+        program=program,
     )
     ratings = _rating_tables(league, tables)
     grown = chain_development(ratings)
@@ -1694,7 +1698,7 @@ def chain(
         assert data is not None, f"no chain_weeks cache for {league} {season}"
         rows, design = data["rows"], data["design"]
 
-        def priors_for(box: np.ndarray, has: np.ndarray):
+        def priors_for(box: np.ndarray, has: np.ndarray, end: bool = False):
             if variant == "baseline":
                 return baseline_priors(design, box)
             return chained_priors(
@@ -1707,6 +1711,7 @@ def chain(
                 settings,
                 grown,
                 last_end,
+                end,
             )
 
         if season > first:
@@ -1740,7 +1745,7 @@ def chain(
                 f"{league} {season}: weeks 0-{weeks} rmse {np.sqrt(np.mean(e**2)):.3f}",
                 flush=True,
             )
-        mean, pen = priors_for(data["box"], data["has_box"])
+        mean, pen = priors_for(data["box"], data["has_box"], end=True)
         w = rows.possessions.astype(float)
         b = solve(design, data["y"], w, pen, prior=mean)
         last_end = SeasonEnd.of(design, b)
@@ -1775,7 +1780,8 @@ def chain(
         variant
         if variant == "baseline"
         else (
-            f"chain-box{box_sd:g}-drift{drift_sd:g}-gap{gap}-team{team_penalty:g}"
+            f"chain-box{box_sd:g}-drift{drift_sd:g}-week{week_drift_sd:g}"
+            + f"-gap{gap}-team{team_penalty:g}"
             + ("" if grow else "-nogrow")
             + (f"-flat{flat_sd:g}" if flat_sd else "")
             + (f"-program{program:g}" if program else "")

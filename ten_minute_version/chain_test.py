@@ -37,7 +37,9 @@ def _newcomer(p: str, season: int):
     return (0.03, 0.04**2), (0.02, 0.02**2)
 
 
-SETTINGS = ChainSettings(box_sd=3.0, drift_sd=1.0, gap=2, team_penalty=30.0, sigma=1.0)
+SETTINGS = ChainSettings(
+    box_sd=3.0, drift_sd=2.0, week_drift_sd=1.0, gap=2, team_penalty=30.0, sigma=1.0
+)
 
 
 def test_a_returner_starts_at_his_last_posterior_grown_and_widened():
@@ -62,6 +64,26 @@ def test_a_returner_starts_at_his_last_posterior_grown_and_widened():
     assert np.isclose(mean[n], 0.03) and np.isclose(pen[n], 1 / 0.04**2)
     t = design.team_column(0, "offense")
     assert pen[t] == 30.0 and pen[design.baseline] == 0.0
+
+
+def test_the_season_end_fit_drifts_by_drift_sd_and_the_weeks_by_week_drift_sd():
+    rows, design = _design()
+    states = {"old": PlayerState(2023, 0.02, 0.01, 0.01**2, 0.015**2, 2)}
+    no_box = np.zeros(len(design.players), bool)
+    settings = ChainSettings(drift_sd=2.0, week_drift_sd=1.0, sigma=1.0)
+    o = design.player_column(design.players.index("old"), "offense")
+    for end, drift in ((False, 0.01), (True, 0.02)):
+        _, pen = chained_priors(
+            design,
+            2024,
+            states,
+            _newcomer,
+            np.zeros(design.columns),
+            no_box,
+            settings,
+            end=end,
+        )
+        assert np.isclose(pen[o], 1 / (0.01**2 + drift**2))
 
 
 def test_a_player_away_longer_than_the_gap_starts_as_a_newcomer():
