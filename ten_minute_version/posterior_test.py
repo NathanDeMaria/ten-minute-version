@@ -2,7 +2,14 @@ import numpy as np
 import pyarrow as pa
 
 from .context import GameContext, Team
-from .posterior import Reported, covariance, gram, main_teams, split_half
+from .posterior import (
+    Reported,
+    covariance,
+    gram,
+    main_teams,
+    split_half,
+    variances,
+)
 from .ratings import Design, Rows, penalties
 
 
@@ -53,6 +60,16 @@ def test_the_covariance_is_the_inverse_precision():
     pen[design.baseline] = pen[design.home] = 1e-6
     expected = 0.9**2 * np.linalg.inv(x.T @ (w[:, None] * x) + np.diag(pen))
     assert np.allclose(covariance(design, w, pen, sigma=0.9), expected)
+
+
+def test_the_variances_are_the_covariances_diagonal():
+    rows = _rows()
+    design = Design.build(rows, teams=True)
+    w = rows.possessions
+    pen = penalties(design, player=50.0, team=5.0)
+    pen[design.baseline] = pen[design.home] = 1e-6
+    full = covariance(design, w, pen, sigma=0.9)
+    assert np.allclose(variances(design, w, pen, sigma=0.9), np.diagonal(full))
 
 
 def test_a_reported_rating_carries_a_fifth_of_its_teams_variance():

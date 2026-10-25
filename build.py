@@ -77,7 +77,13 @@ from ten_minute_version.opponents import (
     schedules,
 )
 from ten_minute_version.plays import read_games
-from ten_minute_version.posterior import SIGMA, Reported, covariance, split_half
+from ten_minute_version.posterior import (
+    SIGMA,
+    Reported,
+    covariance,
+    split_half,
+    variances,
+)
 from ten_minute_version.preseason import FEATURES as MINUTES_FEATURES
 from ten_minute_version.preseason import (
     History,
@@ -107,6 +113,7 @@ from ten_minute_version.ratings import (
     ratings_table,
     solve,
     targets,
+    weighted_gram,
 )
 from ten_minute_version.recruiting import (
     Recruit,
@@ -1704,9 +1711,15 @@ def chain(
 
         if season > first:
             b = None
+            # each week's games are the last week's and more: its X'WX is
+            # the last week's plus the new rows'
+            normal, before = None, np.zeros(len(rows), bool)
             for k, week in enumerate(data["weeks"][: weeks + 1]):
                 mean, pen = priors_for(week["box"], week["has_box"])
                 train = np.array([g in week["train"] for g in rows.game_id])
+                added = weighted_gram(design, rows.possessions * (train & ~before))
+                normal = added if normal is None else normal + added
+                before = train
                 b = solve(
                     design,
                     week["y"].astype(float),
@@ -1714,6 +1727,7 @@ def chain(
                     pen,
                     prior=mean,
                     start=b,
+                    normal=normal,
                 )
                 games = np.array(week["test"], object)
                 predicted, actual = game_margins(rows, design.times(b), games)
@@ -1734,25 +1748,29 @@ def chain(
             last_end = SeasonEnd(teams=last_end.teams)
         # the last season's covariance is only for its ratings table
         if variant != "baseline" and (write_ratings or season < last):
-            cov = covariance(design, w, pen, settings.sigma)
-            reported = Reported.build(rows, design)
             possessions = design.column_squares(w)
-            states = carry(design, b, cov, possessions, season, states)
-            names = {
-                r["athlete_id"]: r["athlete_name"] for r in ratings.get(season, [])
-            }
-            table = chained_table(
-                league, season, design, reported, b, cov, possessions, names
-            )
-            del cov
-            path = (
-                Path(tables)
-                / f"league={league}"
-                / f"season={season}"
-                / "chained_ratings.parquet"
-            )
             if write_ratings:
+                cov = covariance(design, w, pen, settings.sigma)
+                square = np.diagonal(cov).copy()
+                reported = Reported.build(rows, design)
+                names = {
+                    r["athlete_id"]: r["athlete_name"] for r in ratings.get(season, [])
+                }
+                table = chained_table(
+                    league, season, design, reported, b, cov, possessions, names
+                )
+                del cov
+                path = (
+                    Path(tables)
+                    / f"league={league}"
+                    / f"season={season}"
+                    / "chained_ratings.parquet"
+                )
                 pq.write_table(table, path, compression="zstd")
+            else:
+                # carrying needs only each column's variance
+                square = variances(design, w, pen, settings.sigma)
+            states = carry(design, b, square, possessions, season, states)
     tag = (
         variant
         if variant == "baseline"

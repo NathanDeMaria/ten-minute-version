@@ -26,10 +26,12 @@ numpy: ~370,000 rows and ~10,000 ratings fit in seconds.
 """
 
 from dataclasses import dataclass, replace
+from functools import cached_property
 from typing import Mapping, Sequence
 
 import numpy as np
 import pyarrow as pa
+from scipy import sparse
 
 from .context import GameContext
 from .opponents import GENERIC
@@ -204,15 +206,22 @@ class Design:
             np.array(r), np.array(c), np.array(v), len(rows), player_ids, team_ids
         )
 
-    def times(self, b: np.ndarray) -> np.ndarray:
-        return np.bincount(
-            self.row, weights=self.val * b[self.col], minlength=self.rows
+    @cached_property
+    def matrix(self) -> sparse.csr_matrix:
+        """The design as a sparse matrix, built on first use."""
+        return sparse.csr_matrix(
+            (self.val, (self.row, self.col)), shape=(self.rows, self.columns)
         )
 
+    @cached_property
+    def _transposed(self) -> sparse.csr_matrix:
+        return self.matrix.T.tocsr()
+
+    def times(self, b: np.ndarray) -> np.ndarray:
+        return self.matrix @ b
+
     def transpose_times(self, v: np.ndarray) -> np.ndarray:
-        return np.bincount(
-            self.col, weights=self.val * v[self.row], minlength=self.columns
-        )
+        return self._transposed @ v
 
     def column_squares(self, w: np.ndarray) -> np.ndarray:
         return np.bincount(
@@ -228,6 +237,15 @@ def penalties(design: Design, player: float, team: float = 0.0) -> np.ndarray:
     return pen
 
 
+def weighted_gram(design: Design, weight: np.ndarray) -> sparse.csr_matrix:
+    """X'WX, sparse: rows with no weight add nothing, so it's built from the
+    weighted rows alone -- and one week's is the last week's plus its new
+    rows'."""
+    rows = np.flatnonzero(weight)
+    x = design.matrix[rows]
+    return (x.T @ sparse.diags(weight[rows]) @ x).tocsr()
+
+
 def solve(
     design: Design,
     target: np.ndarray,
@@ -236,20 +254,26 @@ def solve(
     prior: np.ndarray | None = None,
     start: np.ndarray | None = None,
     tolerance: float = 1e-7,
+    normal: sparse.csr_matrix | None = None,
 ) -> np.ndarray:
     """
     Minimise sum(weight * (target - Xb)^2) + sum(penalty * (b - prior)^2)
-    by conjugate gradient, preconditioned by the diagonal.
+    by conjugate gradient, preconditioned by the diagonal, on the normal
+    equations: X'WX is a few thousand columns square and under 1% filled,
+    so each step costs a small fraction of a pass over every row. `normal`
+    is X'WX if the caller has it (`weighted_gram`).
     """
     prior = np.zeros(design.columns) if prior is None else prior
+    if normal is None:
+        normal = weighted_gram(design, weight)
     # A column nothing in the weighted rows touches, and nothing penalises,
     # would make the system singular: pin it to its prior.
-    diagonal = design.column_squares(weight) + penalty
+    diagonal = normal.diagonal() + penalty
     free = diagonal > 0
     diagonal = np.where(free, diagonal, 1.0)
 
     def apply(b: np.ndarray) -> np.ndarray:
-        out = design.transpose_times(weight * design.times(b)) + penalty * b
+        out = normal @ b + penalty * b
         return np.where(free, out, b)
 
     rhs = design.transpose_times(weight * target) + penalty * prior
