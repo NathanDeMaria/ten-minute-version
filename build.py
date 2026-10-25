@@ -64,6 +64,8 @@ from ten_minute_version.evaluate import (
     known_games,
 )
 from ten_minute_version.lineups import SIDES
+from ten_minute_version.live import LiveKit, merged, prior_design
+from ten_minute_version.live import as_of as live_as_of
 from ten_minute_version.newcomers import (
     MAX_NOISE,
     NEWCOMER_SCHEMA,
@@ -1669,6 +1671,7 @@ def _chain_fits(
     carry_home: bool = True,
     at_end: Callable[[int, dict, np.ndarray, np.ndarray, np.ndarray], np.ndarray]
     | None = None,
+    final: dict | None = None,
 ) -> Iterator[_WeekFit]:
     """
     The chain (`ten_minute_version.chain`), fitted week by week: every
@@ -1676,7 +1679,9 @@ def _chain_fits(
     before it, then the season's end fit carried to the next. `baseline`
     rates every season alone instead. `at_end(season, data, b, penalty,
     weights)`, if given, sees each end fit and returns its columns'
-    posterior variances; otherwise only those are computed.
+    posterior variances; otherwise only those are computed. `final`, if
+    given, gets what the last season carries to the next: its "states" and
+    "last_end". `weeks` -1 fits only each season's end.
     """
     grown = chain_development(_rating_tables(league, tables))
     found = read_recruits(recruits, league)
@@ -1739,13 +1744,15 @@ def _chain_fits(
         if not carry_home:
             last_end = SeasonEnd(teams=last_end.teams)
         # the last season's covariance is only for its ratings table
-        if not baseline and (at_end is not None or season < last):
+        if not baseline and (at_end is not None or season < last or final is not None):
             if at_end is not None:
                 square = at_end(season, data, b, pen, w)
             else:
                 # carrying needs only each column's variance
                 square = variances(design, w, pen, settings.sigma)
             states = carry(design, b, square, design.column_squares(w), season, states)
+    if final is not None:
+        final["states"], final["last_end"] = states, last_end
 
 
 def chain(
@@ -1965,6 +1972,239 @@ def team_ratings(
     print(f"wrote {path}: {len(found)} rows")
 
 
+LIVE_KIT = "./live"
+
+
+def _kit_path(kit: str, league: str, season: int) -> Path:
+    return Path(kit) / f"{league}-{season}.pkl"
+
+
+def live_kit(
+    league: str,
+    season: int = 2026,
+    first: int = 2013,
+    minutes_from: int = 2014,
+    recruits: str = "./recruits",
+    summaries: str = "./summaries",
+    tables: str = "./stints",
+    cache: str = CHAIN_WEEKS,
+    out: str = LIVE_KIT,
+):
+    """
+    What carries into `season` (`ten_minute_version.live.LiveKit`), fitted
+    once from every season before it: `{out}/{league}-{season}.pkl`, what
+    `live` reads each morning. Needs the `chain_weeks` cache through the
+    season before, and `season_ratings` and `minutes` for every season.
+    """
+    final: dict = {}
+    for _ in _chain_fits(
+        league,
+        ChainSettings(),
+        first,
+        season - 1,
+        -1,
+        recruits,
+        tables,
+        cache,
+        final=final,
+    ):
+        pass
+    spells = _spells(league, tables)
+    history = _histories(league, tables, spells, read_recruits(recruits, league))
+    past = {s: history(s) for s in range(minutes_from, season) if s in spells}
+    examples = _minutes_examples(spells, past)
+    model = MinutesModel.learn(
+        np.vstack([x for x, _ in examples.values()]),
+        np.concatenate([y for _, y in examples.values()]),
+    )
+    before = _load_chain_cache(cache, league, season - 1)
+    assert before is not None, f"no chain_weeks cache for {league} {season - 1}"
+    rows = before["rows"]
+    kit = LiveKit(
+        league,
+        season,
+        final["states"],
+        final["last_end"],
+        dict(chain_development(_rating_tables(league, tables))),
+        model,
+        history(season),
+        Floor.build(rows).pace(np.ones(len(rows), bool)),
+        {
+            c.team(side).team_id: c.team(side).name
+            for c in read_context(summaries, league, season - 1).values()
+            for side in ("home", "away")
+        },
+    )
+    path = _kit_path(out, league, season)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("wb") as file:
+        pickle.dump(kit, file, protocol=5)
+    print(f"wrote {path}: {len(kit.states)} players carried")
+
+
+def live(
+    league: str,
+    season: int = 2026,
+    today: str | None = None,
+    build_tables: bool = True,
+    target: str = "half on 3s and FTs",
+    kit: str = LIVE_KIT,
+    root: str = "./plays",
+    recruits: str = "./recruits",
+    summaries: str = "./summaries",
+    tables: str = "./stints",
+    out: str = "./team-ratings",
+):
+    """
+    Every team's rating as of `today` (default: the date now), from the
+    season's games before it on the kit's priors (`ten_minute_version.live`),
+    into `{out}/{league}_player_ratings.csv` -- replacing any rows already
+    there for the day. `build_tables` first rebuilds the season's stint
+    tables, context and estimated possessions from `root` and `summaries`.
+    A team that hasn't played is its roster (`rosters`, and anyone who has
+    played for it) at projected minutes.
+    """
+    with _kit_path(kit, league, season).open("rb") as file:
+        frozen: LiveKit = pickle.load(file)
+    cut = live_as_of(today)
+    directory = Path(tables) / f"league={league}" / f"season={season}"
+    if build_tables and Path(root, f"league={league}", f"season={season}").exists():
+        stints(league, season, root, summaries, tables)
+        context(league, season, summaries, tables)
+        estimated(league, season, root, summaries, tables)
+    found = read_recruits(recruits, league)
+    newcomer_prior_ = NewcomerPrior.load(league)
+
+    def newcomer(p: str, season: int):
+        r = found.get(p)
+        return newcomer_prior_.side("offense", r, season), newcomer_prior_.side(
+            "defense", r, season
+        )
+
+    settings = ChainSettings()
+    played: dict[str, dict[str, float]] = {}
+    games: dict[str, int] = {}
+    pace: dict[str, float] = {}
+    fitted: tuple[Design, np.ndarray] | None = None
+    built = _season_rows(league, season, summaries, tables, with_estimated=True)
+    if built is not None:
+        rows, shot_rows = built
+        day = {
+            r["game_id"]: r["date"]
+            for r in pq.read_table(directory / "games.parquet").to_pylist()
+        }
+        before = {g for g in set(rows.game_id) if day[g] < cut}
+        if before:
+            design = Design.build(rows, teams=True)
+            train = np.array([g in before for g in rows.game_id])
+            lines = list(read_box_lines(summaries, league, season))
+            profile = box_profile(lines, before)
+            seen = set(profile.players)
+            mean, pen = chained_priors(
+                design,
+                season,
+                frozen.states,
+                newcomer,
+                BoxModel.load(league).prior(design, profile),
+                np.array([p in seen for p in design.players]),
+                settings,
+                frozen.grown,
+                frozen.last_end,
+            )
+            y = TARGETS[target](targets(rows, shot_rows, before))
+            b = solve(design, y, rows.possessions * train, pen, prior=mean)
+            fitted = design, b
+            floor = Floor.build(rows)
+            played = floor.shares(train)
+            games = floor.games(train)
+            pace = floor.pace(train)
+    listed = (
+        [
+            (r["athlete_id"], r["team_id"])
+            for r in pq.read_table(directory / "roster.parquet").to_pylist()
+        ]
+        if (directory / "roster.parquet").exists()
+        else []
+    )
+    roster = sorted(
+        set(listed) | {(p, t) for t, shares in played.items() for p in shares}
+    )
+    roster = [(p, t) for p, t in roster if p != GENERIC]
+    x = np.array(
+        [minutes_features(p, t, season, frozen.history) for p, t in roster]
+    ).reshape(len(roster), len(MINUTES_FEATURES))
+    projected: dict[str, dict[str, float]] = {}
+    for (player, team), share in frozen.minutes.project(roster, x).items():
+        projected.setdefault(team, {})[player] = share
+    teams = sorted(set(projected) | set(played))
+    unplayed = [t for t in teams if not games.get(t)]
+    blank = prior_design(
+        [p for p, _ in roster] + [GENERIC], [*frozen.last_end.teams, *unplayed]
+    )
+    prior_mean, _ = chained_priors(
+        blank,
+        season,
+        frozen.states,
+        newcomer,
+        np.zeros(blank.columns),
+        np.zeros(len(blank.players), bool),
+        settings,
+        frozen.grown,
+        frozen.last_end,
+    )
+    typical = float(np.mean(list((pace or frozen.pace or {"": 68.0}).values())))
+    paces = shrunk_pace(pace, games, frozen.pace, typical, teams)
+    names = dict(frozen.names)
+    for c in read_context(summaries, league, season).values():
+        for side in ("home", "away"):
+            names[c.team(side).team_id] = c.team(side).name
+    new = team_rating_rows(
+        league,
+        season,
+        cut,
+        blank,
+        prior_mean,
+        unplayed,
+        {},
+        projected,
+        paces,
+        games,
+        names,
+    )
+    if fitted is not None:
+        design, b = fitted
+        new += team_rating_rows(
+            league,
+            season,
+            cut,
+            design,
+            b,
+            [t for t in teams if games.get(t)],
+            played,
+            projected,
+            paces,
+            games,
+            names,
+        )
+    path = Path(out) / f"{league}_player_ratings.csv"
+    existing = (
+        pyarrow.csv.read_csv(
+            path,
+            convert_options=pyarrow.csv.ConvertOptions(column_types=TEAM_RATING_SCHEMA),
+        ).to_pylist()
+        if path.exists()
+        else []
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pyarrow.csv.write_csv(
+        pa.Table.from_pylist(merged(existing, new), TEAM_RATING_SCHEMA), path
+    )
+    print(
+        f"{league} {cut}: {len(new)} teams, {len(teams) - len(unplayed)} played;"
+        f" wrote {path}"
+    )
+
+
 def _chain_summary(errors: list[dict], baseline: list[dict]) -> None:
     """Home-margin rmse by week of the season, and the paired t of the gap
     to the baseline's on the same games."""
@@ -2018,6 +2258,8 @@ if __name__ == "__main__":
             "newcomer_prior": newcomer_prior,
             "chain": chain,
             "team_ratings": team_ratings,
+            "live_kit": live_kit,
+            "live": live,
             "evaluate": evaluate,
             "fit": fit,
         }
