@@ -47,6 +47,9 @@ class LiveKit:
     # every team's name by ESPN id, as of last season: so a morning before a
     # team's first game needs only this season's summaries
     names: dict[str, str | None]
+    # the teams ESPN filed in Division I last season: whose rosters a
+    # morning fetches until they've played
+    division_one: list[str]
 
 
 def prior_design(players: Iterable[str], teams: Iterable[str]) -> Design:
