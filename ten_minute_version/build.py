@@ -1881,7 +1881,7 @@ def _available(
     observed: Mapping[str, Mapping[str, float]],
     projected: Mapping[str, Mapping[str, float]],
     history: Mapping[str, list[Mapping[str, float]]],
-) -> dict[str, dict[str, float]]:
+) -> dict[str, Mapping[str, float]]:
     """Each of `teams`' shares reweighted for who's likely to play its next
     game (`availability`): a team rated as the generic player has no one
     to reweight."""
@@ -2146,7 +2146,7 @@ def live(
     played: dict[str, dict[str, float]] = {}
     games: dict[str, int] = {}
     pace: dict[str, float] = {}
-    likely: dict[str, dict[str, float]] = {}
+    likely: dict[str, Mapping[str, float]] = {}
     fitted: tuple[Design, np.ndarray] | None = None
     built = _season_rows(league, season, summaries, tables, with_estimated=True)
     if built is not None:
