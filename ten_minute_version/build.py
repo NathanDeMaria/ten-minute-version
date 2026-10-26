@@ -32,6 +32,8 @@ import pyarrow.compute  # noqa: F401  (pa.compute)
 import pyarrow.csv
 import pyarrow.parquet as pq
 
+from ten_minute_version.availability import available_shares, game_shares
+from ten_minute_version.availability import histories as game_histories
 from ten_minute_version.box_scores import read_box_lines, season_minutes
 from ten_minute_version.carryover import (
     GameTerms,
@@ -136,6 +138,7 @@ from ten_minute_version.team_ratings import (
     Floor,
     shrunk_pace,
     team_rating_rows,
+    team_shares,
 )
 
 
@@ -1872,6 +1875,24 @@ def chain(
         _chain_summary(errors, pq.read_table(reference).to_pylist())
 
 
+def _available(
+    league: str,
+    teams: list[str],
+    observed: Mapping[str, Mapping[str, float]],
+    projected: Mapping[str, Mapping[str, float]],
+    history: Mapping[str, list[Mapping[str, float]]],
+) -> dict[str, dict[str, float]]:
+    """Each of `teams`' shares reweighted for who's likely to play its next
+    game (`availability`): a team rated as the generic player has no one
+    to reweight."""
+    out = {}
+    for team in teams:
+        expected = team_shares(observed, projected, team)
+        if GENERIC not in expected:
+            out[team] = available_shares(league, expected, history.get(team, []))
+    return out
+
+
 def team_ratings(
     league: str,
     first: int = 2013,
@@ -1927,6 +1948,9 @@ def team_ratings(
     last_pace: dict[str, float] = {}
     projected: dict[str, dict[str, float]] = {}
     names: dict[str, str | None] = {}
+    per_game: dict[tuple[str, str], dict[str, float]] = {}
+    day: dict[str, date] = {}
+    row_day = np.array([], object)
     for fit in _chain_fits(
         league, ChainSettings(), first, last, weeks, recruits, tables, cache
     ):
@@ -1939,26 +1963,56 @@ def team_ratings(
             floor = Floor.build(fit.data["rows"])
             projected = projected_shares(fit.season)
             names = team_names(fit.season)
+            per_game = game_shares(floor)
+            day = fit.data["day"]
+            row_day = np.array([day[g] for g in floor.rows.game_id], object)
         assert floor is not None
-        pace = floor.pace(fit.train)
-        games = floor.games(fit.train)
-        typical = float(np.mean(list((pace or last_pace or {"": 68.0}).values())))
-        cut = fit.data["weeks"][fit.week]["cut"]
-        found += team_rating_rows(
-            league,
-            fit.season,
-            cut,
-            fit.data["design"],
-            fit.b,
-            floor.teams,
-            floor.shares(fit.train),
-            projected,
-            shrunk_pace(pace, games, last_pace, typical, floor.teams),
-            games,
-            names,
-        )
+        week = fit.data["weeks"][fit.week]
+        cut = week["cut"]
+        # Every team at the cut, on the games before it; then, the day after
+        # each of the week's game days, the teams that played on it -- the row
+        # a team's next game reads, so its availability has seen its last
+        # game. A day the next cut reaches is the next fit's.
+        stops: list[tuple[date, list[str], np.ndarray]] = [
+            (cut, floor.teams, fit.train)
+        ]
+        for played_on in sorted({day[g] for g in week["test"]}):
+            as_of = played_on + timedelta(days=1)
+            if as_of >= cut + timedelta(days=7):
+                continue
+            teams = sorted(
+                {
+                    t
+                    for g in week["test"]
+                    if day[g] == played_on
+                    for t in (floor.home_team.get(g), floor.away_team.get(g))
+                    if t
+                }
+            )
+            stops.append((as_of, teams, row_day < as_of))
+        for as_of, teams, train in stops:
+            pace = floor.pace(train)
+            games = floor.games(train)
+            typical = float(np.mean(list((pace or last_pace or {"": 68.0}).values())))
+            observed = floor.shares(train)
+            history = game_histories(floor, day, as_of, per_game)
+            found += team_rating_rows(
+                league,
+                fit.season,
+                as_of,
+                fit.data["design"],
+                fit.b,
+                teams,
+                observed,
+                projected,
+                shrunk_pace(pace, games, last_pace, typical, floor.teams),
+                games,
+                names,
+                _available(league, teams, observed, projected, history),
+            )
         if fit.week == 0:
             print(f"{league} {fit.season}: {len(floor.teams)} teams", flush=True)
+    found.sort(key=lambda r: (r["season"], r["as_of"], r["team_id"]))
     path = Path(out) / f"{league}_player_ratings.csv"
     path.parent.mkdir(parents=True, exist_ok=True)
     pyarrow.csv.write_csv(pa.Table.from_pylist(found, TEAM_RATING_SCHEMA), path)
@@ -2092,6 +2146,7 @@ def live(
     played: dict[str, dict[str, float]] = {}
     games: dict[str, int] = {}
     pace: dict[str, float] = {}
+    likely: dict[str, dict[str, float]] = {}
     fitted: tuple[Design, np.ndarray] | None = None
     built = _season_rows(league, season, summaries, tables, with_estimated=True)
     if built is not None:
@@ -2125,6 +2180,13 @@ def live(
             played = floor.shares(train)
             games = floor.games(train)
             pace = floor.pace(train)
+            likely = _available(
+                league,
+                sorted(played),
+                played,
+                {},
+                game_histories(floor, day, cut),
+            )
     listed = (
         [
             (r["athlete_id"], r["team_id"])
@@ -2192,6 +2254,7 @@ def live(
             paces,
             games,
             names,
+            likely,
         )
     path = Path(out) / f"{league}_player_ratings.csv"
     existing = (
