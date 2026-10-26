@@ -51,7 +51,8 @@ def test_recent_games_count_most():
     assert recent_share("p", []) is None
     # a starter who has missed the last two: well below his season's 2/3
     games = [{"p": 1.0}] * 4 + [{}, {}]
-    assert recent_share("p", games) < 2 / 3
+    recent = recent_share("p", games)
+    assert recent is not None and recent < 2 / 3
 
 
 def test_a_player_who_has_been_missing_gives_his_share_to_the_rest():

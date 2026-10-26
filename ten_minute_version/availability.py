@@ -21,9 +21,10 @@ same total. Scored against Cassandra's `glicko_players` on held-out
 seasons, what that does to a team's net (`available` beside `net` in the
 row) is worth Brier -0.00020 mens and -0.00022 womens (t -3.9), at about
 0.2 logit a point: not folded into `net`, whose weight in Cassandra is the
-players' margin's, but carried apart for a weight of its own. Knowing who
-actually played would be worth -0.0008 -- the rest is absences nobody
-could see coming.
+players' margin's, but carried apart for a weight of its own. In
+Cassandra at weight 30 on this daily backfill, the replay agrees: -0.00024
+mens, -0.00033 womens. Knowing who actually played would be worth -0.0008
+-- the rest is absences nobody could see coming.
 """
 
 from collections import defaultdict
