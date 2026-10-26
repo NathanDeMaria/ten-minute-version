@@ -126,3 +126,34 @@ def test_rows_fit_the_schema():
 def test_pace_is_averaged_with_two_games_at_the_prior():
     pace = shrunk_pace({"H": 60.0}, {"H": 2}, {"H": 70.0}, 68.0, ["H", "A"])
     assert pace == {"H": pytest.approx(65.0), "A": pytest.approx(68.0)}
+
+
+def test_available_is_the_net_at_the_likely_shares():
+    rows = _rows()
+    design = Design.build(rows, teams=True)
+    b = np.zeros(design.columns)
+    at = {p: i for i, p in enumerate(design.players)}
+    b[2 * at["h5"]] = 0.05  # h5 is H's good one
+    floor = Floor.build(rows)
+    every = np.ones(len(rows), bool)
+    shares = floor.shares(every)
+    without_h5 = {p: s for p, s in shares["H"].items() if p != "h5"}
+    without_h5 = {p: s * 5 / sum(without_h5.values()) for p, s in without_h5.items()}
+    found = team_rating_rows(
+        "mens",
+        2025,
+        date(2024, 11, 4),
+        design,
+        b,
+        ["H", "A"],
+        shares,
+        {},
+        floor.pace(every),
+        floor.games(every),
+        {},
+        {"H": without_h5},
+    )
+    home, away = found
+    assert home["net"] == pytest.approx(0.6 * 5)
+    assert home["available"] == pytest.approx(0.0)
+    assert away["available"] == pytest.approx(away["net"])
