@@ -32,7 +32,12 @@ import pyarrow.compute  # noqa: F401  (pa.compute)
 import pyarrow.csv
 import pyarrow.parquet as pq
 
-from ten_minute_version.availability import available_shares, game_shares
+from ten_minute_version.availability import (
+    chances_in,
+    expected_net,
+    game_shares,
+    healthy_shares,
+)
 from ten_minute_version.availability import histories as game_histories
 from ten_minute_version.box_scores import read_box_lines, season_minutes
 from ten_minute_version.carryover import (
@@ -1877,19 +1882,34 @@ def chain(
 
 def _available(
     league: str,
+    design: Design,
+    b: np.ndarray,
     teams: list[str],
     observed: Mapping[str, Mapping[str, float]],
     projected: Mapping[str, Mapping[str, float]],
     history: Mapping[str, list[Mapping[str, float]]],
-) -> dict[str, Mapping[str, float]]:
-    """Each of `teams`' shares reweighted for who's likely to play its next
-    game (`availability`): a team rated as the generic player has no one
-    to reweight."""
+) -> dict[str, float]:
+    """Each of `teams`' net per possession averaged over who might miss its
+    next game (`availability.expected_net`), from its games so far. A team
+    that hasn't played has nothing yet to say who's missing, and one rated
+    as the generic player has no one to miss: neither is here."""
+    at = {p: i for i, p in enumerate(design.players)}
+    values = {p: float(b[2 * i] + b[2 * i + 1]) for p, i in at.items()}
     out = {}
     for team in teams:
+        games = history.get(team, [])
         expected = team_shares(observed, projected, team)
-        if GENERIC not in expected:
-            out[team] = available_shares(league, expected, history.get(team, []))
+        if not games or GENERIC in expected:
+            continue
+        healthy = healthy_shares(expected, games)
+        net = expected_net(healthy, values, chances_in(league, list(healthy), games))
+        if team in design.teams:
+            j = design.teams.index(team)
+            net += float(
+                b[design.team_column(j, "offense")]
+                + b[design.team_column(j, "defense")]
+            )
+        out[team] = net
     return out
 
 
@@ -2008,7 +2028,15 @@ def team_ratings(
                 shrunk_pace(pace, games, last_pace, typical, floor.teams),
                 games,
                 names,
-                _available(league, teams, observed, projected, history),
+                _available(
+                    league,
+                    fit.data["design"],
+                    fit.b,
+                    teams,
+                    observed,
+                    projected,
+                    history,
+                ),
             )
         if fit.week == 0:
             print(f"{league} {fit.season}: {len(floor.teams)} teams", flush=True)
@@ -2146,7 +2174,7 @@ def live(
     played: dict[str, dict[str, float]] = {}
     games: dict[str, int] = {}
     pace: dict[str, float] = {}
-    likely: dict[str, Mapping[str, float]] = {}
+    likely: dict[str, float] = {}
     fitted: tuple[Design, np.ndarray] | None = None
     built = _season_rows(league, season, summaries, tables, with_estimated=True)
     if built is not None:
@@ -2182,6 +2210,8 @@ def live(
             pace = floor.pace(train)
             likely = _available(
                 league,
+                design,
+                b,
                 sorted(played),
                 played,
                 {},
