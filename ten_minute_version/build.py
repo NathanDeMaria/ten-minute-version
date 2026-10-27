@@ -33,12 +33,11 @@ import pyarrow.csv
 import pyarrow.parquet as pq
 
 from ten_minute_version.availability import (
+    SeasonGames,
     chances_in,
     expected_net,
-    game_shares,
     healthy_shares,
 )
-from ten_minute_version.availability import histories as game_histories
 from ten_minute_version.box_scores import read_box_lines, season_minutes
 from ten_minute_version.carryover import (
     GameTerms,
@@ -1887,7 +1886,8 @@ def _available(
     teams: list[str],
     observed: Mapping[str, Mapping[str, float]],
     projected: Mapping[str, Mapping[str, float]],
-    history: Mapping[str, list[Mapping[str, float]]],
+    season_games: SeasonGames,
+    as_of: date,
 ) -> dict[str, float]:
     """Each of `teams`' net per possession averaged over who might miss its
     next game (`availability.expected_net`), from its games so far. A team
@@ -1897,12 +1897,13 @@ def _available(
     values = {p: float(b[2 * i] + b[2 * i + 1]) for p, i in at.items()}
     out = {}
     for team in teams:
-        games = history.get(team, [])
+        games = season_games.before(team, as_of)
         expected = team_shares(observed, projected, team)
-        if not games or GENERIC in expected:
+        if not games.shares or GENERIC in expected:
             continue
         healthy = healthy_shares(expected, games)
-        net = expected_net(healthy, values, chances_in(league, list(healthy), games))
+        chances = chances_in(league, list(healthy), games)
+        net = expected_net(healthy, values, chances, games)
         if team in design.teams:
             j = design.teams.index(team)
             net += float(
@@ -1968,7 +1969,7 @@ def team_ratings(
     last_pace: dict[str, float] = {}
     projected: dict[str, dict[str, float]] = {}
     names: dict[str, str | None] = {}
-    per_game: dict[tuple[str, str], dict[str, float]] = {}
+    season_games: SeasonGames | None = None
     day: dict[str, date] = {}
     row_day = np.array([], object)
     for fit in _chain_fits(
@@ -1983,10 +1984,10 @@ def team_ratings(
             floor = Floor.build(fit.data["rows"])
             projected = projected_shares(fit.season)
             names = team_names(fit.season)
-            per_game = game_shares(floor)
             day = fit.data["day"]
+            season_games = SeasonGames.build(floor, day)
             row_day = np.array([day[g] for g in floor.rows.game_id], object)
-        assert floor is not None
+        assert floor is not None and season_games is not None
         week = fit.data["weeks"][fit.week]
         cut = week["cut"]
         # Every team at the cut, on the games before it; then, the day after
@@ -2015,7 +2016,6 @@ def team_ratings(
             games = floor.games(train)
             typical = float(np.mean(list((pace or last_pace or {"": 68.0}).values())))
             observed = floor.shares(train)
-            history = game_histories(floor, day, as_of, per_game)
             found += team_rating_rows(
                 league,
                 fit.season,
@@ -2035,7 +2035,8 @@ def team_ratings(
                     teams,
                     observed,
                     projected,
-                    history,
+                    season_games,
+                    as_of,
                 ),
             )
         if fit.week == 0:
@@ -2215,7 +2216,8 @@ def live(
                 sorted(played),
                 played,
                 {},
-                game_histories(floor, day, cut),
+                SeasonGames.build(floor, day),
+                cut,
             )
     listed = (
         [
