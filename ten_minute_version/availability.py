@@ -1,6 +1,6 @@
 """
-Who is likely to play a team's next game, from its games so far: the
-shares a team's row is rated at, reweighted for who has been missing.
+Who is likely to play a team's next game, from its games so far, and what
+the team is worth over the ways it might line up.
 
 Nobody publishes college basketball availability before tip -- ESPN's
 summaries carry no injuries for it (the NBA's do), and the NCAA's reports
@@ -13,20 +13,22 @@ there is. Two things in them say a player may not play:
   in the game looks: under a quarter of his usual share, 30-35% miss the
   next one, against 6% of everyone else.
 
-Measured on 2014-2025 (`OUT_CHANCE`, a cell's rate from every season).
-A player's expected share is then his *recent* share -- each game's weight
-halving every `HALF_LIFE` games back, a miss counting as none -- in place
-of his season's, times his chance of playing, the team's rescaled to the
-same total. Scored against Cassandra's `glicko_players` on held-out
-seasons, what that does to a team's net (`available` beside `net` in the
-row) is worth Brier -0.00020 mens and -0.00022 womens (t -3.9), at about
-0.2 logit a point: not folded into `net`, whose weight in Cassandra is the
-players' margin's, but carried apart for a weight of its own. In
-Cassandra at weight 30 on this daily backfill, the replay agrees: -0.00024
-mens, -0.00033 womens. Knowing who actually played would be worth -0.0008
--- the rest is absences nobody could see coming.
+Each league's rates over 2014-2025 are `OUT_CHANCE`.
+
+A team's row then carries, beside `net`, its **expected** net
+(`expected_net`): the team healthy -- each player at his recent share,
+each game's weight halving every `HALF_LIFE` games back, a miss counting as
+none (`healthy_shares`) -- averaged over who might be out, each player
+independently at his chance of playing, each scenario's lineup its
+available players at their shares rescaled to the team's total.
+
+Scored against Cassandra's `glicko_players` on held-out seasons (2014+),
+the gap between the expected net and the row's net is worth Brier -0.00020
+mens and -0.00021 womens (t -3.8). Knowing who actually played would be
+worth -0.0008 -- the rest is absences nobody could see coming.
 """
 
+import itertools
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import date
@@ -36,7 +38,12 @@ import numpy as np
 from .team_ratings import Floor, Shares
 
 # Each game's weight in a player's recent share halves this many games back.
-HALF_LIFE = 3.0
+HALF_LIFE = 4.0
+
+# A player at least this likely to miss is one whose absence `expected_net`
+# enumerates, at most `MAX_EXACT` of them; the rest it takes to first order.
+RISKY = 0.2
+MAX_EXACT = 8
 
 # The chance a player misses a team's next game, by what its games so far
 # say of him (`cell`): each league's rate over 2014-2025.
@@ -147,17 +154,71 @@ def recent_share(player: str, games: Sequence[Shares]) -> float | None:
     return float(np.average(past, weights=weights))
 
 
-def available_shares(league: str, expected: Shares, games: Sequence[Shares]) -> Shares:
-    """`expected`, each player reweighted to his recent share and his chance
-    of playing, rescaled to the same total: the shares a team's next game is
-    likeliest to be played at."""
-    chances = OUT_CHANCE[league]
-    weighted = {}
+def healthy_shares(expected: Shares, games: Sequence[Shares]) -> Shares:
+    """The team with everyone available: each player at his recent share
+    (`recent_share`) in place of his season's, rescaled to the same total --
+    a rotation as it has lately been, not as it was in November."""
+    tilted = {}
     for player, share in expected.items():
         recent = recent_share(player, games)
-        tilt = recent / share if recent is not None and share > 0 else 1.0
-        weighted[player] = share * tilt * (1 - chances[cell(player, games)])
-    total, kept = sum(expected.values()), sum(weighted.values())
+        tilted[player] = recent if recent is not None and share > 0 else share
+    total, kept = sum(expected.values()), sum(tilted.values())
     if kept <= 0:
         return dict(expected)
-    return {p: s * total / kept for p, s in weighted.items()}
+    return {p: s * total / kept for p, s in tilted.items()}
+
+
+def chances_in(
+    league: str, players: Sequence[str], games: Sequence[Shares]
+) -> dict[str, float]:
+    """Each player's chance of playing the team's next game (`OUT_CHANCE`)."""
+    out = OUT_CHANCE[league]
+    return {p: 1 - out[cell(p, games)] for p in players}
+
+
+def expected_net(
+    shares: Shares, values: Mapping[str, float], chances: Mapping[str, float]
+) -> float:
+    """The team's players' net averaged over who might be out.
+
+    A scenario is a set of players available; its lineup is them at their
+    `shares`, rescaled to the team's total, and its net is each one's share
+    times his `values` (offense plus defense; 0 for a player without one).
+    Each player is available independently at his `chances`.
+
+    Every player has some chance of missing -- 6% even after a full game --
+    so every scenario can't be counted. The ones whose chance of missing is
+    at least `RISKY` (the `MAX_EXACT` likeliest) are enumerated exactly;
+    the rest are taken to first order, each one's absence on its own, on
+    top of each scenario of the risky ones: two of them missing together is
+    a fraction of a percent. Against simulating every player at once, this
+    agrees to a correlation of 0.98-0.99 on 2014-2025's team-games.
+    """
+    players = list(shares)
+    s = np.array([shares[p] for p in players])
+    v = np.array([values.get(p, 0.0) for p in players])
+    risk = np.array([1 - chances.get(p, 1.0) for p in players])
+    total = s.sum()
+    order = np.argsort(-risk, kind="stable")[:MAX_EXACT]
+    risky = order[risk[order] >= RISKY]
+    safe = np.setdiff1d(np.arange(len(players)), risky)
+    found, weight = 0.0, 0.0
+    for pattern in itertools.product((True, False), repeat=len(risky)):
+        available = np.ones(len(players), bool)
+        available[risky] = pattern
+        p = float(np.prod(np.where(pattern, 1 - risk[risky], risk[risky])))
+        kept = s * available
+        on = kept.sum()
+        if p <= 0 or on <= 0:
+            continue
+        value = (kept * v).sum()
+        net = value * total / on
+        for k in safe:
+            rest = on - s[k]
+            if rest > 0:
+                net += risk[k] * (
+                    (value - s[k] * v[k]) * total / rest - value * total / on
+                )
+        found += p * net
+        weight += p
+    return found / weight if weight else float((s * v).sum())

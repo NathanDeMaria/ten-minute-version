@@ -219,8 +219,8 @@ TEAM_RATING_SCHEMA = pa.schema(
         pa.field("games", pa.int16(), nullable=False),
         # the league's, per 100, at each end
         pa.field("home_edge", pa.float32(), nullable=False),
-        # net per 100 at the shares the team's next game is likeliest to be
-        # played at (`availability`); `net` where nothing says otherwise
+        # net per 100 averaged over who might miss the team's next game
+        # (`availability.expected_net`); `net` where nothing says otherwise
         pa.field("available", pa.float32()),
     ]
 )
@@ -238,22 +238,19 @@ def team_rating_rows(
     pace: Mapping[str, float],
     games: Mapping[str, int],
     names: Mapping[str, str | None],
-    available: Mapping[str, Shares] | None = None,
+    available: Mapping[str, float] | None = None,
 ) -> list[dict]:
     """One `TEAM_RATING_SCHEMA` row per team in `teams`, `pace` already
     filled in from last season's where a team has none of its own, and
-    `available` the shares its next game is likeliest played at, where
-    known (`availability.available_shares`)."""
+    `available` its net per possession over who might miss its next game,
+    where known (`availability.expected_net`)."""
     edge = float(b[design.home]) * 100
     out = []
     for team in teams:
         offense, defense = team_sides(
             design, b, team, team_shares(observed, projected, team)
         )
-        likely = (available or {}).get(team)
-        ready = offense + defense
-        if likely is not None:
-            ready = sum(team_sides(design, b, team, likely))
+        ready = (available or {}).get(team, offense + defense)
         out.append(
             {
                 "league": league,
