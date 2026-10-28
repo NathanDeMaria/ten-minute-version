@@ -72,6 +72,7 @@ from ten_minute_version.lineups import SIDES
 from ten_minute_version.live import LiveKit, merged, prior_design
 from ten_minute_version.live import as_of as live_as_of
 from ten_minute_version.luck import (
+    centered,
     game_luck,
     luck_rows,
     merged_luck,
@@ -2215,6 +2216,7 @@ def live(
             luck_path = Path(out) / f"{league}_luck.csv"
             known = read_luck(luck_path)
             seen = {r["game_id"] for r in known}
+            contexts = read_context(summaries, league, season)
             write_luck(
                 luck_path,
                 merged_luck(
@@ -2223,8 +2225,12 @@ def live(
                         league,
                         season,
                         cut,
-                        game_luck(rows, fitted_targets, before - seen),
-                        read_context(summaries, league, season),
+                        centered(
+                            game_luck(rows, fitted_targets, before),
+                            before - seen,
+                            contexts,
+                        ),
+                        contexts,
                         day,
                     ),
                 ),
@@ -2376,8 +2382,14 @@ def luck(
             if not new:
                 continue
             fitted = targets(rows, shot_rows, train)
+            luck_so_far = game_luck(rows, fitted, train)
             found += luck_rows(
-                league, season, cut, game_luck(rows, fitted, new), contexts, day
+                league,
+                season,
+                cut,
+                centered(luck_so_far, new, contexts),
+                contexts,
+                day,
             )
             done |= new
         print(f"{league} {season}: {len(done)} games", flush=True)

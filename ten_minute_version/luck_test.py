@@ -4,7 +4,14 @@ import numpy as np
 import pytest
 
 from .context import GameContext, Team
-from .luck import game_luck, luck_rows, merged_luck, read_luck, write_luck
+from .luck import (
+    centered,
+    game_luck,
+    luck_rows,
+    merged_luck,
+    read_luck,
+    write_luck,
+)
 from .ratings import Targets
 from .team_ratings_test import _rows
 
@@ -70,3 +77,15 @@ def test_a_games_luck_stays_as_first_known(tmp_path):
     assert row["luck"] == pytest.approx(2.0)
     assert row["as_of"] == date(2025, 11, 5)
     assert read_luck(tmp_path / "nothing.csv") == []
+
+
+def test_a_home_sites_luck_is_less_the_home_sides_average():
+    team = lambda t: Team(t, t, None, None, True)  # noqa: E731
+    contexts = {
+        "g1": GameContext("g1", False, False, team("H"), team("A")),
+        "g2": GameContext("g2", False, False, team("A"), team("H")),
+        "g3": GameContext("g3", True, False, team("H"), team("A")),
+    }
+    luck = {"g1": 3.0, "g2": 1.0, "g3": 5.0, "g4": 9.0}
+    # home sites average 2; the neutral site's stays; g4 has no context
+    assert centered(luck, ["g1", "g3", "g4"], contexts) == {"g1": 1.0, "g3": 5.0}
