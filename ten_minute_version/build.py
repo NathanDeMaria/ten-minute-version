@@ -71,6 +71,13 @@ from ten_minute_version.evaluate import (
 from ten_minute_version.lineups import SIDES
 from ten_minute_version.live import LiveKit, merged, prior_design
 from ten_minute_version.live import as_of as live_as_of
+from ten_minute_version.luck import (
+    game_luck,
+    luck_rows,
+    merged_luck,
+    read_luck,
+    write_luck,
+)
 from ten_minute_version.newcomers import (
     MAX_NOISE,
     NEWCOMER_SCHEMA,
@@ -2149,7 +2156,8 @@ def live(
     Every team's rating as of `today` (default: the date now), from the
     season's games before it on the kit's priors (`ten_minute_version.live`),
     into `{out}/{league}_player_ratings.csv` -- replacing any rows already
-    there for the day. `build_tables` first rebuilds the season's stint
+    there for the day -- and the luck of each game before it not yet in
+    `{out}/{league}_luck.csv` (`ten_minute_version.luck`). `build_tables` first rebuilds the season's stint
     tables, context and estimated possessions from `root` and `summaries`.
     A team that hasn't played is its roster (`rosters`, and anyone who has
     played for it) at projected minutes.
@@ -2202,7 +2210,25 @@ def live(
                 frozen.grown,
                 frozen.last_end,
             )
-            y = TARGETS[target](targets(rows, shot_rows, before))
+            fitted_targets = targets(rows, shot_rows, before)
+            y = TARGETS[target](fitted_targets)
+            luck_path = Path(out) / f"{league}_luck.csv"
+            known = read_luck(luck_path)
+            seen = {r["game_id"] for r in known}
+            write_luck(
+                luck_path,
+                merged_luck(
+                    known,
+                    luck_rows(
+                        league,
+                        season,
+                        cut,
+                        game_luck(rows, fitted_targets, before - seen),
+                        read_context(summaries, league, season),
+                        day,
+                    ),
+                ),
+            )
             b = solve(design, y, rows.possessions * train, pen, prior=mean)
             fitted = design, b
             floor = Floor.build(rows)
@@ -2305,6 +2331,58 @@ def live(
         f"{league} {cut}: {len(new)} teams, {len(teams) - len(unplayed)} played;"
         f" wrote {path}"
     )
+
+
+def luck(
+    league: str,
+    first: int = 2013,
+    last: int = 2025,
+    weeks: int = 24,
+    summaries: str = "./summaries",
+    tables: str = "./stints",
+    out: str = "./team-ratings",
+):
+    """
+    Every game's shooting luck in `first`-`last` (`ten_minute_version.luck`),
+    each from the first weekly cut after it -- the shot model and skills
+    fitted on the games before that cut, as `chain_weeks` cuts them; a
+    season's last games, after its last cut, from every game of it -- into
+    `{out}/{league}_luck.csv`, replacing those seasons' rows.
+    """
+    path = Path(out) / f"{league}_luck.csv"
+    rebuilt = set(range(first, last + 1))
+    found = [r for r in read_luck(path) if r["season"] not in rebuilt]
+    for season in range(first, last + 1):
+        built = _season_rows(league, season, summaries, tables, with_estimated=True)
+        if built is None:
+            print(f"{league} {season}: not built, skipped")
+            continue
+        rows, shot_rows = built
+        directory = Path(tables) / f"league={league}" / f"season={season}"
+        day = {
+            r["game_id"]: r["date"]
+            for r in pq.read_table(directory / "games.parquet").to_pylist()
+        }
+        contexts = read_context(summaries, league, season)
+        games = sorted(set(rows.game_id))
+        start = min(day[g] for g in games)
+        done: set[str] = set()
+        for k in range(weeks + 2):
+            cut = start + timedelta(days=7 * k)
+            train = {g for g in games if day[g] < cut} if k <= weeks else set(games)
+            if k > weeks:
+                cut = max(day[g] for g in games) + timedelta(days=1)
+            new = train - done
+            if not new:
+                continue
+            fitted = targets(rows, shot_rows, train)
+            found += luck_rows(
+                league, season, cut, game_luck(rows, fitted, new), contexts, day
+            )
+            done |= new
+        print(f"{league} {season}: {len(done)} games", flush=True)
+    write_luck(path, merged_luck([], found))
+    print(f"wrote {path}: {len(found)} games")
 
 
 def morning(
@@ -2412,6 +2490,7 @@ COMMANDS = {
     "newcomer_prior": newcomer_prior,
     "chain": chain,
     "team_ratings": team_ratings,
+    "luck": luck,
     "live_kit": live_kit,
     "live": live,
     "morning": morning,
