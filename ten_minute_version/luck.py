@@ -10,6 +10,12 @@ chance, so finishing and rim protection would go with it, and the defense
 has least say over threes and free throws -- the same split the ratings'
 target ("half on 3s and FTs") makes.
 
+The shot model knows nothing of where a game is played, and home sides
+shoot better than it expects of them: 1.3 points a game mens, 1.1 womens.
+That's the home edge, not luck, and the model reading this has its own; so
+a game at a home site is filed less the home sides' average luck over the
+same fit's games (`centered`), and a neutral site's as it is.
+
 A game's luck is as known soon after it: the shot model and the shooters'
 skills are fitted on the games before the first cut after it -- the first
 weekly fit whose training games include it, in the backfill (`build.luck`);
@@ -20,9 +26,15 @@ Measured on 2014-2025, each team's luck so far this season predicts the
 next game's residual of Cassandra's `glicko_players` against it (-0.0011
 logit per point mens, -0.0016 womens, t -6): a team that's been lucky is
 overrated. Taking part of each game's luck out of the margin Glicko learns
-from, its Brier on 2014+ games: 0.3 of it -0.00027 mens, -0.00035 womens;
-0.4 -0.00028, -0.00040; all of it +0.0008, +0.0004 -- the shot model's
-expectation misses some of what's real, as the ratings' targets found.
+from, at its 2026-10-28 fit, Brier on 2014+ games against none:
+
+    share       0.3        0.4        0.5        0.6        1 (uncentered)
+    mens     -0.00035   -0.00038   -0.00037   -0.00031   +0.0008
+    womens   -0.00038   -0.00044   -0.00045   -0.00041   +0.0004
+
+Uncentered, 0.4 is -0.00027 mens and -0.00040 womens. All of it is too
+much: the shot model's expectation misses some of what's real, as the
+ratings' targets found.
 """
 
 from collections import defaultdict
@@ -69,6 +81,23 @@ def game_luck(rows: Rows, fitted: Targets, games: Iterable[str]) -> dict[str, fl
         if game_id in wanted:
             found[game_id] += float(value)
     return dict(found)
+
+
+def centered(
+    luck: Mapping[str, float], games: Iterable[str], contexts: Mapping[str, GameContext]
+) -> dict[str, float]:
+    """`games`' luck less the home sides' average over all of `luck`'s games
+    at a home site -- what the same fit says of everyone -- a neutral site's
+    as it is. A game without a context is left out, as `luck_rows` would."""
+    home = [
+        v for g, v in luck.items() if g in contexts and not contexts[g].neutral_site
+    ]
+    edge = float(np.mean(home)) if home else 0.0
+    return {
+        g: luck[g] - (0.0 if contexts[g].neutral_site else edge)
+        for g in games
+        if g in luck and g in contexts
+    }
 
 
 def luck_rows(
