@@ -84,6 +84,17 @@ def variances(
     return sigma**2 * np.einsum("ij,ij->j", inverse, inverse)
 
 
+def factor(design: Design, weight: np.ndarray, penalty: np.ndarray) -> np.ndarray:
+    """The lower Cholesky factor L of X'WX + diag(penalty): a linear mix c
+    of the columns has posterior variance sigma^2 |L^-1 c|^2, a triangular
+    solve per mix rather than the whole inverse."""
+    (potrf,) = get_lapack_funcs(("potrf",), (np.empty(0),))
+    out, info = potrf(precision(gram(design, weight), penalty), lower=True, clean=True)
+    if info != 0:
+        raise np.linalg.LinAlgError(f"not positive definite (potrf {info})")
+    return out
+
+
 def covariance(
     design: Design, weight: np.ndarray, penalty: np.ndarray, sigma: float = SIGMA
 ) -> np.ndarray:

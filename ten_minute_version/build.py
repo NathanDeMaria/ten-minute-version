@@ -98,6 +98,7 @@ from ten_minute_version.posterior import (
     SIGMA,
     Reported,
     covariance,
+    factor,
     split_half,
     variances,
 )
@@ -148,6 +149,7 @@ from ten_minute_version.stints import season_tables
 from ten_minute_version.team_ratings import (
     TEAM_RATING_SCHEMA,
     Floor,
+    net_sds,
     shrunk_pace,
     team_rating_rows,
     team_shares,
@@ -1656,13 +1658,14 @@ def newcomer_prior(
 class _WeekFit:
     """One week's fit in the chain: `b` from the games before its cut,
     `train` which of the season's rows those are; `data` is the season's
-    `chain_weeks` cache."""
+    `chain_weeks` cache; `penalty` each column's, for its posterior."""
 
     season: int
     week: int
     train: np.ndarray
     b: np.ndarray
     data: dict
+    penalty: np.ndarray | None = None
 
 
 def _chain_fits(
@@ -1744,7 +1747,7 @@ def _chain_fits(
                     start=b,
                     normal=normal,
                 )
-                yield _WeekFit(season, k, train, b, data)
+                yield _WeekFit(season, k, train, b, data, pen)
         mean, pen = priors_for(data["box"], data["has_box"], end=True)
         w = rows.possessions.astype(float)
         b = solve(design, data["y"], w, pen, prior=mean)
@@ -2019,6 +2022,10 @@ def team_ratings(
                 }
             )
             stops.append((as_of, teams, row_day < as_of))
+        assert fit.penalty is not None
+        lower = factor(
+            fit.data["design"], floor.rows.possessions * fit.train, fit.penalty
+        )
         for as_of, teams, train in stops:
             pace = floor.pace(train)
             games = floor.games(train)
@@ -2046,7 +2053,13 @@ def team_ratings(
                     season_games,
                     as_of,
                 ),
+                net_sds(
+                    fit.data["design"],
+                    lower,
+                    {t: team_shares(observed, projected, t) for t in teams},
+                ),
             )
+        del lower
         if fit.week == 0:
             print(f"{league} {fit.season}: {len(floor.teams)} teams", flush=True)
     found.sort(key=lambda r: (r["season"], r["as_of"], r["team_id"]))
@@ -2185,7 +2198,7 @@ def live(
     games: dict[str, int] = {}
     pace: dict[str, float] = {}
     likely: dict[str, float] = {}
-    fitted: tuple[Design, np.ndarray] | None = None
+    fitted: tuple[Design, np.ndarray, np.ndarray] | None = None
     built = _season_rows(league, season, summaries, tables, with_estimated=True)
     if built is not None:
         rows, shot_rows = built
@@ -2236,7 +2249,7 @@ def live(
                 ),
             )
             b = solve(design, y, rows.possessions * train, pen, prior=mean)
-            fitted = design, b
+            fitted = design, b, factor(design, rows.possessions * train, pen)
             floor = Floor.build(rows)
             played = floor.shares(train)
             games = floor.games(train)
@@ -2274,7 +2287,7 @@ def live(
     blank = prior_design(
         [p for p, _ in roster] + [GENERIC], [*frozen.last_end.teams, *unplayed]
     )
-    prior_mean, _ = chained_priors(
+    prior_mean, prior_penalty = chained_priors(
         blank,
         season,
         frozen.states,
@@ -2303,22 +2316,31 @@ def live(
         paces,
         games,
         names,
+        sds=net_sds(
+            blank,
+            factor(blank, np.empty(0), prior_penalty),
+            {t: team_shares({}, projected, t) for t in unplayed},
+        ),
     )
     if fitted is not None:
-        design, b = fitted
+        design, b, lower = fitted
+        rated = [t for t in teams if games.get(t)]
         new += team_rating_rows(
             league,
             season,
             cut,
             design,
             b,
-            [t for t in teams if games.get(t)],
+            rated,
             played,
             projected,
             paces,
             games,
             names,
             likely,
+            net_sds(
+                design, lower, {t: team_shares(played, projected, t) for t in rated}
+            ),
         )
     path = Path(out) / f"{league}_player_ratings.csv"
     existing = (
