@@ -179,3 +179,15 @@ def test_a_nets_sd_is_its_columns_mix_through_the_full_covariance():
     none = net_sds(design, factor(design, first * 0, pen), {"H": shares})
     assert none["H"] > found["H"]
     assert net_sds(design, factor(design, w, pen), {}) == {}
+
+
+def test_a_team_none_of_whose_players_are_rated_is_the_generic_player():
+    design = Design.build(_rows(), teams=True)
+    b = np.zeros(design.columns)
+    g = design.players.index(GENERIC)
+    b[2 * g], b[2 * g + 1] = -0.2, -0.15
+    # an outside team projected from its box scores: nobody the fit rated
+    outside = {"x1": 1.0, "x2": 1.0, "x3": 1.0, "x4": 1.0, "x5": 1.0}
+    assert team_sides(design, b, "X", outside) == pytest.approx((-0.2, -0.15))
+    # one rated player is enough to read the shares as they are
+    assert team_sides(design, b, "X", {**outside, "h1": 1.0}) == (0.0, 0.0)

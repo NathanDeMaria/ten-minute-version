@@ -173,13 +173,26 @@ def team_shares(
     return observed.get(team) or projected.get(team) or {GENERIC: 1.0}
 
 
+def rated_shares(at: Mapping[str, int], shares: Shares) -> Shares:
+    """`shares` as a design whose players are `at` can rate them: a team none of whose players it
+    has is the generic player's. A team from outside Division I is projected
+    from its box scores before it plays, but its players were never rated --
+    every possession against it is the generic side's -- and summed over
+    nobody, it came out an average Division I team: 0 where it's -34 per
+    100 mens, -22 womens, in every opener against one."""
+    if any(p in at for p in shares):
+        return shares
+    return {GENERIC: 1.0}
+
+
 def team_sides(
     design: Design, b: np.ndarray, team: str, shares: Shares
 ) -> tuple[float, float]:
     """A team's (offense, defense) per possession under `b`: its players'
-    columns at their shares, plus its team column. A player `design`
-    doesn't have counts at 0."""
+    columns at their shares (`rated_shares`), plus its team column. A
+    player `design` doesn't have counts at 0."""
     at = {p: i for i, p in enumerate(design.players)}
+    shares = rated_shares(at, shares)
     offense = sum(s * b[2 * at[p]] for p, s in shares.items() if p in at)
     defense = sum(s * b[2 * at[p] + 1] for p, s in shares.items() if p in at)
     if team in design.teams:
@@ -205,7 +218,7 @@ def net_sds(
     teams = list(sides)
     mix = np.zeros((design.columns, len(teams)))
     for j, team in enumerate(teams):
-        for p, s in sides[team].items():
+        for p, s in rated_shares(at, sides[team]).items():
             if p in at:
                 mix[2 * at[p], j] += s
                 mix[2 * at[p] + 1, j] += s
