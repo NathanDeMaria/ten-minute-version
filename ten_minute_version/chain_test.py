@@ -1,5 +1,8 @@
+from dataclasses import replace
+
 import numpy as np
 import pyarrow as pa
+import pytest
 
 from .chain import (
     ChainSettings,
@@ -201,3 +204,24 @@ def test_the_home_edge_and_some_of_each_team_carry_from_the_last_season():
     assert np.isclose(
         mean[design.team_column(design.teams.index("H"), "offense")], 0.02
     )
+
+
+def test_an_outside_teams_column_is_as_wide_as_outside_sd():
+    _, design = _design()
+    box = np.zeros(design.columns)
+    has = np.zeros(len(design.players), bool)
+    team = design.teams[0]
+    j = design.team_column(0, "offense")
+    wide = ChainSettings(outside_sd=15.0)
+    _, plain = chained_priors(design, 2024, {}, _newcomer, box, has, wide)
+    _, out = chained_priors(
+        design, 2024, {}, _newcomer, box, has, wide, outside=frozenset({team})
+    )
+    assert plain[j] == pytest.approx(wide.team_penalty)
+    assert out[j] == pytest.approx(wide.sigma**2 / 0.15**2)
+    # 0 is off
+    flat = replace(SETTINGS, outside_sd=0.0)
+    _, off = chained_priors(
+        design, 2024, {}, _newcomer, box, has, flat, outside=frozenset({team})
+    )
+    assert off[j] == pytest.approx(flat.team_penalty)
