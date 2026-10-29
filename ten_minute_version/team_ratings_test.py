@@ -6,11 +6,13 @@ import pytest
 
 from .context import GameContext, Team
 from .opponents import GENERIC
-from .ratings import Design, Rows
+from .posterior import covariance, factor
+from .ratings import Design, Rows, penalties
 from .team_ratings import (
     TEAM_RATING_SCHEMA,
     Floor,
     home_margin,
+    net_sds,
     shrunk_pace,
     team_rating_rows,
     team_shares,
@@ -154,3 +156,26 @@ def test_available_is_the_expected_net_where_given():
     assert home["net"] == pytest.approx(0.6 * 5)
     assert home["available"] == pytest.approx(1.0)
     assert away["available"] == pytest.approx(away["net"])
+
+
+def test_a_nets_sd_is_its_columns_mix_through_the_full_covariance():
+    rows = _rows()
+    design = Design.build(rows, teams=True)
+    w = rows.possessions.astype(float)
+    pen = penalties(design, player=10.0, team=3.0)
+    shares = {"h1": 1.0, "h5": 0.6, "h6": 0.4}
+    found = net_sds(design, factor(design, w, pen), {"H": shares})
+    at = {p: i for i, p in enumerate(design.players)}
+    mix = np.zeros(design.columns)
+    for p, s in shares.items():
+        mix[2 * at[p]] += s
+        mix[2 * at[p] + 1] += s
+    j = design.teams.index("H")
+    mix[design.team_column(j, "offense")] += 1
+    mix[design.team_column(j, "defense")] += 1
+    assert found["H"] == pytest.approx(np.sqrt(mix @ covariance(design, w, pen) @ mix))
+    # fewer games, less sure
+    first = w * np.array([g == "g1" for g in rows.game_id])
+    none = net_sds(design, factor(design, first * 0, pen), {"H": shares})
+    assert none["H"] > found["H"]
+    assert net_sds(design, factor(design, w, pen), {}) == {}

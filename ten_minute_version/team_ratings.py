@@ -35,8 +35,10 @@ from datetime import date
 
 import numpy as np
 import pyarrow as pa
+from scipy.linalg import solve_triangular
 
 from .opponents import GENERIC
+from .posterior import SIGMA
 from .ratings import Design, Rows
 
 # player -> share of his team's floor time, a team's adding up to five
@@ -187,6 +189,36 @@ def team_sides(
     return float(offense), float(defense)
 
 
+def net_sds(
+    design: Design,
+    lower: np.ndarray,
+    sides: Mapping[str, Shares],
+    sigma: float = SIGMA,
+) -> dict[str, float]:
+    """Each team's posterior sd of its net per possession at its shares in
+    `sides` -- the same columns `team_sides` adds up -- from the fit's
+    Cholesky factor `lower` (`posterior.factor`). Through the full
+    covariance, not each column's alone: a team's players and its team
+    column are fitted from the same possessions, and their errors lean
+    against each other."""
+    at = {p: i for i, p in enumerate(design.players)}
+    teams = list(sides)
+    mix = np.zeros((design.columns, len(teams)))
+    for j, team in enumerate(teams):
+        for p, s in sides[team].items():
+            if p in at:
+                mix[2 * at[p], j] += s
+                mix[2 * at[p] + 1, j] += s
+        if team in design.teams:
+            k = design.teams.index(team)
+            mix[design.team_column(k, "offense"), j] += 1.0
+            mix[design.team_column(k, "defense"), j] += 1.0
+    if not teams:
+        return {}
+    z = solve_triangular(lower, mix, lower=True, check_finite=False)
+    return dict(zip(teams, (sigma * np.sqrt((z**2).sum(axis=0))).tolist()))
+
+
 def home_margin(
     home: tuple[float, float, float],
     away: tuple[float, float, float],
@@ -222,6 +254,9 @@ TEAM_RATING_SCHEMA = pa.schema(
         # net per 100 averaged over who might miss the team's next game
         # (`availability.expected_net`); `net` where nothing says otherwise
         pa.field("available", pa.float32()),
+        # per 100, how sure the fit is of `net`: its posterior sd at the
+        # row's shares (`net_sds`); null where not worked out
+        pa.field("net_sd", pa.float32()),
     ]
 )
 
@@ -239,11 +274,13 @@ def team_rating_rows(
     games: Mapping[str, int],
     names: Mapping[str, str | None],
     available: Mapping[str, float] | None = None,
+    sds: Mapping[str, float] | None = None,
 ) -> list[dict]:
     """One `TEAM_RATING_SCHEMA` row per team in `teams`, `pace` already
-    filled in from last season's where a team has none of its own, and
+    filled in from last season's where a team has none of its own,
     `available` its net per possession over who might miss its next game,
-    where known (`availability.expected_net`)."""
+    where known (`availability.expected_net`), and `sds` its net's posterior
+    sd per possession, where known (`net_sds`)."""
     edge = float(b[design.home]) * 100
     out = []
     for team in teams:
@@ -251,6 +288,7 @@ def team_rating_rows(
             design, b, team, team_shares(observed, projected, team)
         )
         ready = (available or {}).get(team, offense + defense)
+        sd = (sds or {}).get(team)
         out.append(
             {
                 "league": league,
@@ -265,6 +303,7 @@ def team_rating_rows(
                 "games": games.get(team, 0),
                 "home_edge": edge,
                 "available": ready * 100,
+                "net_sd": None if sd is None else sd * 100,
             }
         )
     return out
