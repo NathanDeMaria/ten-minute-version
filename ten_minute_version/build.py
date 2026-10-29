@@ -1711,6 +1711,8 @@ def _chain_fits(
         assert data is not None, f"no chain_weeks cache for {league} {season}"
         rows, design = data["rows"], data["design"]
 
+        outside = _outside_teams(tables, league, season)
+
         def priors_for(box: np.ndarray, has: np.ndarray, end: bool = False):
             if baseline:
                 return baseline_priors(design, box)
@@ -1725,6 +1727,7 @@ def _chain_fits(
                 grown,
                 last_end,
                 end,
+                outside,
             )
 
         if season > first:
@@ -1780,6 +1783,7 @@ def chain(
     grow: bool = True,
     flat_sd: float = 0.0,
     program: float = 1.0,
+    outside_sd: float = 10.0,
     carry_home: bool = True,
     write_ratings: bool = True,
     recruits: str = "./recruits",
@@ -1810,6 +1814,7 @@ def chain(
         development=grow,
         flat_sd=flat_sd,
         program=program,
+        outside_sd=outside_sd,
     )
     ratings = _rating_tables(league, tables)
     errors: list[dict] = []
@@ -1879,6 +1884,7 @@ def chain(
             + ("" if grow else "-nogrow")
             + (f"-flat{flat_sd:g}" if flat_sd else "")
             + (f"-program{program:g}" if program else "")
+            + (f"-outside{outside_sd:g}" if outside_sd != 10.0 else "")
             + ("" if carry_home else "-nohome")
         )
     )
@@ -2076,6 +2082,20 @@ def _kit_path(kit: str, league: str, season: int) -> Path:
     return Path(kit) / f"{league}-{season}.pkl"
 
 
+def _outside_teams(tables: str, league: str, season: int) -> frozenset[str]:
+    """The teams from outside Division I in a season's games, by its
+    context table; none if the table isn't built."""
+    path = Path(tables) / f"league={league}" / f"season={season}" / "context.parquet"
+    if not path.exists():
+        return frozenset()
+    found: set[str] = set()
+    for r in pq.read_table(path).to_pylist():
+        for side in ("home", "away"):
+            if not r[f"{side}_division_one"]:
+                found.add(r[f"{side}_team_id"])
+    return frozenset(found)
+
+
 def _division_one(contexts: Mapping[str, GameContext]) -> list[str]:
     """Every team ESPN files in Division I, in a season's games."""
     return sorted(
@@ -2223,6 +2243,7 @@ def live(
                 settings,
                 frozen.grown,
                 frozen.last_end,
+                outside=_outside_teams(tables, league, season),
             )
             fitted_targets = targets(rows, shot_rows, before)
             y = TARGETS[target](fitted_targets)
@@ -2297,6 +2318,7 @@ def live(
         settings,
         frozen.grown,
         frozen.last_end,
+        outside=frozenset(t for t in unplayed if t not in set(frozen.division_one)),
     )
     typical = float(np.mean(list((pace or frozen.pace or {"": 68.0}).values())))
     paces = shrunk_pace(pace, games, frozen.pace, typical, teams)

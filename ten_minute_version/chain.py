@@ -73,7 +73,7 @@ random-walk Kalman filter would) did nothing at a 120-day memory and hurt
 at 60.
 """
 
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -101,6 +101,15 @@ class ChainSettings:
     flat_sd: float = 0.0  # >0: every carried and newcomer prior at this width instead
     program: float = 1.0  # how much of a team's column its next season starts at
     sigma: float = SIGMA
+    # >0: a team from outside Division I's column at this width instead of
+    # `team_penalty`'s -- such teams vary far more around the generic player
+    # than a program does around its last season. Weeks 0-10 of 2014-2025,
+    # margin rmse: 0 (team_penalty's ~5) 12.284 mens / 13.481 womens; 10
+    # 12.239 / 13.428 (t -5.8, -5.4); 15, 20 and 30 worse. Division I's own
+    # games gain too (11.592 -> 11.567 mens): an outside team's results land
+    # on its column instead of on the players who played it. Wider helps
+    # those a little more and the outside teams' own games a lot less.
+    outside_sd: float = 10.0
 
 
 @dataclass(frozen=True)
@@ -200,6 +209,7 @@ def chained_priors(
     grown: Mapping[int, tuple[float, float]] | None = None,
     last: SeasonEnd = SeasonEnd(),
     end: bool = False,
+    outside: Collection[str] = frozenset(),
 ) -> tuple[np.ndarray, np.ndarray]:
     """(prior mean, penalty) for every column of `design` in `season`: see
     the module's docstring. `box` is the box-score prior from the games so
@@ -209,7 +219,8 @@ def chained_priors(
     but before the first game, without them, every prediction is at no home
     edge. A team starts at `program` of its last column. `end` is the
     season-end fit, the one carried: its returners drift by `drift_sd`,
-    the weekly fits' by `week_drift_sd`."""
+    the weekly fits' by `week_drift_sd`. A team in `outside` (from outside
+    Division I) has its column at `outside_sd`, if set."""
     players = len(design.players)
     pen = penalties(design, player=1000.0, team=settings.team_penalty)
     mean = np.zeros(design.columns)
@@ -219,6 +230,11 @@ def chained_priors(
             o, d = last.teams[t]
             mean[design.team_column(j, "offense")] = settings.program * o
             mean[design.team_column(j, "defense")] = settings.program * d
+        if settings.outside_sd > 0 and t in outside:
+            for side in ("offense", "defense"):
+                pen[design.team_column(j, side)] = (
+                    settings.sigma**2 / (settings.outside_sd / 100) ** 2
+                )
     var = np.zeros(2 * players)
     box_var = (settings.box_sd / 100) ** 2
     drift = ((settings.drift_sd if end else settings.week_drift_sd) / 100) ** 2
