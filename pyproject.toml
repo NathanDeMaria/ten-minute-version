@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-call-it-what-you-want = { git = "https://github.com/NathanDeMaria/call-it-what-you-want.git", rev = "d1622a577f9ab5ee61f58a91485d2a9dbab5b241" }
+call-it-what-you-want = { git = "https://github.com/NathanDeMaria/call-it-what-you-want.git", rev = "472c117a90769bb3dbea02316f86a7aaf5c2c83c" }
 
 [dependency-groups]
 dev = [
