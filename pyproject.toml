@@ -27,8 +27,8 @@ dev = [
     # `build.py`'s CLI.
     "fire>=0.7.1",
     "pytest>=9.0.2",
-    "ruff>=0.14.10",
-    "ty>=0.0.65",
+    "ruff>=0.17.3",
+    "ty>=0.0.94",
 ]
 
 [build-system]
@@ -38,17 +38,28 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["ten_minute_version"]
 
+# Below here is the template's. `copier update` brings changes to it from
+# mirrorball, so per-repo additions are better made as new keys than as edits.
+
 [tool.ruff]
 line-length = 88
 
 [tool.ruff.lint]
-# "I" is import sorting, which `make lint` fixes in place. "F" is pyflakes.
-select = ["I", "F"]
+# Ruff's defaults (E4, E7, E9, F), import sorting, and pyupgrade -- which
+# reads requires-python to decide what's outdated.
+select = ["E4", "E7", "E9", "F", "I", "UP"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["ten_minute_version"]
 
-[tool.pytest.ini_options]
+[tool.ty.terminal]
+# A warning fails `make check` and CI, same as an error. Silence one on purpose
+# with `# ty: ignore[rule]`, which ty itself flags once it's no longer needed.
+error-on-warning = true
+
+[tool.pytest]
+# Unknown markers, bad config keys and xfails that pass are failures.
+strict = true
 # Not into the local data (`make plays`, `make summaries`): walking every
 # season's summaries takes pytest 15 s. The rest are pytest's own defaults.
 norecursedirs = ["plays", "stints", "summaries", ".*", "build", "dist", "*.egg", "venv"]
