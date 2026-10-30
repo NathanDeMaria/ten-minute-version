@@ -30,8 +30,9 @@ is what keeps a short side short rather than invented.
 """
 
 from bisect import bisect_left
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal, Sequence
+from typing import Literal
 
 from .events import Kind
 from .plays import Play

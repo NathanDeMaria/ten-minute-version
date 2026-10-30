@@ -11,10 +11,10 @@ bucket, or a local copy of it (`make plays`). Only the columns below are
 read. The layout is the contract with endgame; nothing here imports it.
 """
 
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Iterator
 
 import pyarrow.dataset as ds
 

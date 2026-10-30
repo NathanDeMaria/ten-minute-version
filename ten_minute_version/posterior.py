@@ -25,8 +25,8 @@ and the box score both carry the other half's results otherwise, and the
 halves agree more than they should.
 """
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping
 
 import numpy as np
 from scipy import sparse
@@ -155,7 +155,7 @@ class Reported:
     team: np.ndarray  # team offense column (defense is the next), or -1
 
     @classmethod
-    def build(cls, rows: Rows, design: Design) -> "Reported":
+    def build(cls, rows: Rows, design: Design) -> Reported:
         offense = np.array(
             [design.player_column(i, "offense") for i in range(len(design.players))],
             dtype=int,

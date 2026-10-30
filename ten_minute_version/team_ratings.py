@@ -70,7 +70,7 @@ class Floor:
     away_team: Mapping[str, str]
 
     @classmethod
-    def build(cls, rows: Rows) -> "Floor":
+    def build(cls, rows: Rows) -> Floor:
         row, pair, weight = [], [], []
         pair_at: dict[tuple[str, str], int] = {}
         for i in range(len(rows)):

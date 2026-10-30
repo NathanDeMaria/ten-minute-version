@@ -106,7 +106,7 @@ class MinutesModel:
     coefficients: tuple[float, ...]
 
     @classmethod
-    def learn(cls, x: np.ndarray, shares: np.ndarray) -> "MinutesModel":
+    def learn(cls, x: np.ndarray, shares: np.ndarray) -> MinutesModel:
         design = np.hstack([np.ones((len(x), 1)), x])
         return cls(tuple(map(float, np.linalg.lstsq(design, shares, rcond=None)[0])))
 

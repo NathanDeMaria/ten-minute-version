@@ -25,10 +25,9 @@ Solved by conjugate gradient on the normal equations, with nothing but
 numpy: ~370,000 rows and ~10,000 ratings fit in seconds.
 """
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from functools import cached_property
-from typing import Mapping, Sequence
 
 import numpy as np
 import pyarrow as pa
@@ -75,7 +74,7 @@ class Rows:
         stints: pa.Table,
         contexts: Mapping[str, GameContext],
         generic: Callable[[str], str] | None = None,
-    ) -> "Rows":
+    ) -> Rows:
         """The table's rows; a generic side as `generic` of its team
         (`divisions.division_generics`), if given, else as the table has it."""
         t = stints.to_pydict()
@@ -165,9 +164,7 @@ class Design:
         return 2 * len(self.players) + 2 * i + (side == "defense")
 
     @classmethod
-    def build(
-        cls, rows: Rows, *, players: bool = True, teams: bool = False
-    ) -> "Design":
+    def build(cls, rows: Rows, *, players: bool = True, teams: bool = False) -> Design:
         player_ids = (
             sorted({p for five in (*rows.offense, *rows.defense) for p in five})
             if players
@@ -435,7 +432,7 @@ class Score:
     # two can be compared game by game (`paired_t`).
     errors: np.ndarray
 
-    def paired_t(self, other: "Score") -> float:
+    def paired_t(self, other: Score) -> float:
         """
         How sure the squared-error gap to `other` is, as a t statistic on
         the same games: positive when this one's errors are bigger.

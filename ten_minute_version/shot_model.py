@@ -25,8 +25,8 @@ the penalty `k` chosen by how well skills from half a season's games
 predict the other half's makes (`choose_shrinkage`).
 """
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Mapping, Sequence
 
 import numpy as np
 
@@ -55,7 +55,7 @@ class Shots:
     y: np.ndarray
 
     @classmethod
-    def from_rows(cls, rows: Sequence[Mapping]) -> "Shots":
+    def from_rows(cls, rows: Sequence[Mapping]) -> Shots:
         def floats(name: str) -> np.ndarray:
             return np.array(
                 [np.nan if r[name] is None else r[name] for r in rows], float
@@ -70,7 +70,7 @@ class Shots:
             y=floats("y"),
         )
 
-    def take(self, mask: np.ndarray) -> "Shots":
+    def take(self, mask: np.ndarray) -> Shots:
         return Shots(
             *(getattr(self, name)[mask] for name in Shots.__dataclass_fields__)
         )

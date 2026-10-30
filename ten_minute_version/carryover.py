@@ -20,9 +20,9 @@ least-squares weight per term), and scored on the weeks after, by the
 error in their home margins.
 """
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
-from typing import Mapping, Sequence
 
 import numpy as np
 

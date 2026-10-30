@@ -27,7 +27,7 @@ the counted points are exact in 70-93% of games and within three in 90-99%.
 """
 
 from collections import defaultdict
-from typing import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
 import pyarrow as pa
 

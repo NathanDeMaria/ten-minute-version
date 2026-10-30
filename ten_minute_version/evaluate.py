@@ -15,8 +15,8 @@ free throws, steals and assists name their player only in the text -- before
 """
 
 from collections import Counter
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, replace
-from typing import Callable, Iterable, Sequence
 
 import numpy as np
 

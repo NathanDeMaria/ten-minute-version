@@ -183,7 +183,7 @@ class SeasonGames:
     with_off: Mapping[str, np.ndarray]
 
     @classmethod
-    def build(cls, floor: Floor, day: Mapping[str, date]) -> "SeasonGames":
+    def build(cls, floor: Floor, day: Mapping[str, date]) -> SeasonGames:
         rows = floor.rows
         per_game = game_shares(floor)
         margin: dict[str, float] = defaultdict(float)

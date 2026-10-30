@@ -32,9 +32,9 @@ should take `probabilities` rather than these guesses.
 import math
 from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Iterable, Mapping, Sequence
 
 from .events import Kind, classify
 from .lineups import SIDES, Floor, actors

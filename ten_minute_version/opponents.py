@@ -49,8 +49,8 @@ division's generic player (`divisions`).
 """
 
 from collections import Counter
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from typing import Iterable, Mapping
 
 from .context import GameContext
 from .events import other
