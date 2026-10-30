@@ -79,6 +79,7 @@ from dataclasses import dataclass, field
 import numpy as np
 import pyarrow as pa
 
+from .divisions import is_generic
 from .posterior import SIGMA, Reported
 from .ratings import Design, penalties
 
@@ -110,6 +111,17 @@ class ChainSettings:
     # on its column instead of on the players who played it. Wider helps
     # those a little more and the outside teams' own games a lot less.
     outside_sd: float = 10.0
+    # A generic player's (`divisions`) prior width each season, on top of
+    # its last season's posterior: its division's level is learned again
+    # each season rather than held, where a player's drift would hold it to
+    # within ~1 per 100 of last season's -- and the season's shift landed on
+    # its teams' columns instead (outside teams' columns averaged -2 to -14
+    # at the season's end). Weeks 0-10 of 2014-2025, margin rmse, one
+    # generic player held as a player is (12.239 mens / 13.428 womens)
+    # against a generic per division at 5: 12.146 / 13.338; 10: 12.151 /
+    # 13.298; 20: 12.155 / 13.274 (t -7.4, -7.2). Division I's own games
+    # gain too (11.567 -> 11.558 mens, 12.675 -> 12.666 womens).
+    generic_sd: float = 20.0
 
 
 @dataclass(frozen=True)
@@ -241,14 +253,19 @@ def chained_priors(
     for i, p in enumerate(design.players):
         o, d = 2 * i, 2 * i + 1
         state = states.get(p)
+        generic = is_generic(p)
         if state is not None and season - state.season <= settings.gap:
             gap = season - state.season
             step = (grown or {}).get(min(state.seasons, 3), (0.0, 0.0))
-            if not settings.development:
+            # a generic player is a division, which doesn't grow up
+            if not settings.development or generic:
                 step = (0.0, 0.0)
             mean[o], mean[d] = state.offense + step[0], state.defense + step[1]
-            var[o] = state.var_offense + drift * gap
-            var[d] = state.var_defense + drift * gap
+            widen = drift * gap
+            if generic:
+                widen += (settings.generic_sd / 100) ** 2
+            var[o] = state.var_offense + widen
+            var[d] = state.var_defense + widen
         else:
             (mean[o], var[o]), (mean[d], var[d]) = newcomer(p, season)
         if settings.flat_sd > 0:

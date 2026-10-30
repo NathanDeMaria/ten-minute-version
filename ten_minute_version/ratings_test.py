@@ -129,6 +129,20 @@ def test_with_team_columns_a_rating_carries_a_fifth_of_its_teams():
     assert row["team"] == "Home"
 
 
+def test_a_generic_side_is_its_teams_generic_when_told_it():
+    table = _stints(
+        [
+            ("g1", 1, "home", HOME, ["generic"], 10, 9),
+            ("g1", 1, "away", ["generic"], HOME, 10, 8),
+        ]
+    )
+    plain = Rows.build(table, _contexts())
+    assert plain.defense[0] == ["generic"] and plain.offense[1] == ["generic"]
+    told = Rows.build(table, _contexts(), lambda team: f"generic:{team.lower()}")
+    assert told.defense[0] == ["generic:a"] and told.offense[1] == ["generic:a"]
+    assert told.offense[0] == HOME
+
+
 def test_a_generic_sides_shooters_are_one_shooter():
     """Generic shooters -- a different one every few shots -- who make a
     fifth of their threes against Division I's two fifths are expected to

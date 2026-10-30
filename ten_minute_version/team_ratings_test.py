@@ -80,6 +80,11 @@ def test_a_team_is_as_played_else_as_projected_else_generic():
     assert team_shares(played, projected, "A") == {"a1": 5.0}
     assert team_shares(played, projected, "G") == {GENERIC: 1.0}
 
+    def division(team: str) -> str:
+        return "generic:d3"
+
+    assert team_shares(played, projected, "G", division) == {"generic:d3": 1.0}
+
 
 def test_a_team_is_its_players_at_their_shares_plus_its_column():
     rows = _rows()
@@ -191,3 +196,8 @@ def test_a_team_none_of_whose_players_are_rated_is_the_generic_player():
     assert team_sides(design, b, "X", outside) == pytest.approx((-0.2, -0.15))
     # one rated player is enough to read the shares as they are
     assert team_sides(design, b, "X", {**outside, "h1": 1.0}) == (0.0, 0.0)
+    # and with a generic for each division, it's the team's own
+    assert team_sides(design, b, "X", outside, lambda t: "generic:d2") == (0.0, 0.0)
+    assert team_sides(design, b, "X", outside, lambda t: GENERIC) == pytest.approx(
+        (-0.2, -0.15)
+    )
