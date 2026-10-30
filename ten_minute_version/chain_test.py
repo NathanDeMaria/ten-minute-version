@@ -97,6 +97,12 @@ def test_a_generic_player_is_relearned_each_season_and_doesnt_grow():
     o = renamed.player_column(renamed.players.index("generic:d2"), "offense")
     assert np.isclose(mean[o], -0.3) and np.isclose(mean[o + 1], -0.2)
     assert np.isclose(pen[o], 1 / (0.001**2 + 0.01**2 + 0.05**2))
+    # seasons since it last played don't make it a newcomer
+    mean, pen = chained_priors(
+        renamed, 2030, states, _newcomer, np.zeros(design.columns), no_box, settings
+    )
+    assert np.isclose(mean[o], -0.3)
+    assert np.isclose(pen[o], 1 / (0.001**2 + 7 * 0.01**2 + 0.05**2))
 
 
 def test_the_season_end_fit_drifts_by_drift_sd_and_the_weeks_by_week_drift_sd():

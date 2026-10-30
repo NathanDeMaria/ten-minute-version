@@ -112,15 +112,18 @@ class ChainSettings:
     # those a little more and the outside teams' own games a lot less.
     outside_sd: float = 10.0
     # A generic player's (`divisions`) prior width each season, on top of
-    # its last season's posterior: its division's level is learned again
-    # each season rather than held, where a player's drift would hold it to
-    # within ~1 per 100 of last season's -- and the season's shift landed on
-    # its teams' columns instead (outside teams' columns averaged -2 to -14
-    # at the season's end). Weeks 0-10 of 2014-2025, margin rmse, one
-    # generic player held as a player is (12.239 mens / 13.428 womens)
-    # against a generic per division at 5: 12.146 / 13.338; 10: 12.151 /
-    # 13.298; 20: 12.155 / 13.274 (t -7.4, -7.2). Division I's own games
-    # gain too (11.567 -> 11.558 mens, 12.675 -> 12.666 womens).
+    # its last season's posterior however long ago (or the newcomer prior,
+    # before it's played): its division's level is learned again each
+    # season, not held. Held to a player's drift, it stays within ~1 per 100
+    # of last season's and the season's shift lands on its teams' columns
+    # (outside teams' columns averaged -2 to -14 at the season's end); and a
+    # generic gone longer than `gap` came back as a newcomer, an average
+    # Division I player -- womens' outside teams are scarce before 2019.
+    # Weeks 0-10 of 2014-2025, margin rmse, one generic player: 12.239 mens,
+    # 13.428 womens; a generic per division at 20, relearned every season:
+    # 12.153 / 13.227 (t -7.5, -8.3); at 20 but lapsing after `gap` as a
+    # player does: 12.167 / 13.357. Division I's own games gain too (11.567
+    # -> 11.558 mens, 12.675 -> 12.666 womens).
     generic_sd: float = 20.0
 
 
@@ -254,20 +257,21 @@ def chained_priors(
         o, d = 2 * i, 2 * i + 1
         state = states.get(p)
         generic = is_generic(p)
-        if state is not None and season - state.season <= settings.gap:
+        # a generic player is a division: it carries however long since it
+        # last played, and doesn't grow up
+        if state is not None and (generic or season - state.season <= settings.gap):
             gap = season - state.season
             step = (grown or {}).get(min(state.seasons, 3), (0.0, 0.0))
-            # a generic player is a division, which doesn't grow up
             if not settings.development or generic:
                 step = (0.0, 0.0)
             mean[o], mean[d] = state.offense + step[0], state.defense + step[1]
-            widen = drift * gap
-            if generic:
-                widen += (settings.generic_sd / 100) ** 2
-            var[o] = state.var_offense + widen
-            var[d] = state.var_defense + widen
+            var[o] = state.var_offense + drift * gap
+            var[d] = state.var_defense + drift * gap
         else:
             (mean[o], var[o]), (mean[d], var[d]) = newcomer(p, season)
+        if generic:
+            var[o] += (settings.generic_sd / 100) ** 2
+            var[d] += (settings.generic_sd / 100) ** 2
         if settings.flat_sd > 0:
             var[o] = var[d] = (settings.flat_sd / 100) ** 2
         if has_box[i]:
