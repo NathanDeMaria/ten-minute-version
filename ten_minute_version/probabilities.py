@@ -15,9 +15,9 @@ install, and the fit is a few coefficients in `releases/`.
 import json
 import math
 from bisect import bisect_left, bisect_right
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Sequence
 
 import numpy as np
 
@@ -93,7 +93,7 @@ class OnFloorModel:
     @classmethod
     def load(
         cls, league: str, with_box_scores: bool = False, path: Path | None = None
-    ) -> "OnFloorModel":
+    ) -> OnFloorModel:
         path = path or cls.release_path(league, with_box_scores)
         raw = json.loads(path.read_text())
         if tuple(raw["features"]) != FEATURES:

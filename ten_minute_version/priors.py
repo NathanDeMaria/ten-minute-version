@@ -26,9 +26,9 @@ still ends up where his lineups put him.
 """
 
 import json
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
 
 import numpy as np
 
@@ -171,7 +171,7 @@ class BoxModel:
         fitted: np.ndarray,
         profile: BoxProfile,
         exposure: Mapping[str, float],
-    ) -> "BoxModel":
+    ) -> BoxModel:
         """Regress `fitted`'s player columns on the box score, weighted by
         possessions, as `box_prior` does."""
         at = {p: i for i, p in enumerate(profile.players)}
@@ -234,7 +234,7 @@ class BoxModel:
         return path
 
     @classmethod
-    def load(cls, league: str, path: Path | None = None) -> "BoxModel":
+    def load(cls, league: str, path: Path | None = None) -> BoxModel:
         path = path or cls.release_path(league)
         raw = json.loads(path.read_text())
         if tuple(raw["features"]) != FEATURES:

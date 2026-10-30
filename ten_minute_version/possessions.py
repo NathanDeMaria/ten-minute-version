@@ -24,8 +24,9 @@ play that wasn't a free throw, and hasn't been fouled since. Their points
 are kept apart (`technical_points`), so the game's total still adds up.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Literal, Sequence
+from typing import Literal
 
 from .events import FREE_THROWS, POINTS, SHOTS, Kind, offense, other
 from .lineups import Floor

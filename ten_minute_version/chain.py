@@ -138,7 +138,7 @@ class SeasonEnd:
     teams: Mapping[str, tuple[float, float]] = field(default_factory=dict)
 
     @classmethod
-    def of(cls, design: Design, b: np.ndarray) -> "SeasonEnd":
+    def of(cls, design: Design, b: np.ndarray) -> SeasonEnd:
         return cls(
             float(b[design.baseline]),
             float(b[design.home]),

@@ -12,8 +12,8 @@ import json
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable
 
 import pyarrow as pa
 

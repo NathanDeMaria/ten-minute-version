@@ -38,9 +38,9 @@ freshmen far above the rest).
 
 import json
 import math
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Sequence
 
 import numpy as np
 import pyarrow as pa
@@ -138,7 +138,7 @@ class NewcomerPrior:
         league: str,
         found: Sequence[NewcomerEstimate],
         noise_scale: tuple[float, float] = (1.0, 1.0),
-    ) -> "NewcomerPrior":
+    ) -> NewcomerPrior:
         """Maximum likelihood on newcomers' nearly unshrunk estimates, each
         side's noise scaled by `noise_scale` (offense, defense)."""
         kept = [n for n in found if max(n.var_offense, n.var_defense) < MAX_NOISE]
@@ -189,7 +189,7 @@ class NewcomerPrior:
         return path
 
     @classmethod
-    def load(cls, league: str, path: Path | None = None) -> "NewcomerPrior":
+    def load(cls, league: str, path: Path | None = None) -> NewcomerPrior:
         raw = json.loads((path or cls.release_path(league)).read_text())
         return cls(
             raw["league"],

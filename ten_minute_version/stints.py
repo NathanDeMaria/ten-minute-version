@@ -20,8 +20,9 @@ five, how many repairs the lineups needed, and whether the points counted
 match ESPN's final.
 """
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable, NamedTuple
+from typing import NamedTuple
 
 import pyarrow as pa
 

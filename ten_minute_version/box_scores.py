@@ -5,10 +5,11 @@ each player's minutes for each team over a season, for the preseason
 projection (`preseason`).
 """
 
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any
 
 import pyarrow as pa
 

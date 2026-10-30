@@ -22,9 +22,9 @@ given, and shipped in `releases/`.
 
 import csv
 import json
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Mapping
 
 import numpy as np
 
@@ -119,7 +119,7 @@ class RecruitModel:
         league: str,
         found: Iterable[Newcomer],
         recruits: Mapping[str, Recruit],
-    ) -> "RecruitModel":
+    ) -> RecruitModel:
         found = list(found)
         x = np.array(
             [(1.0, *features(recruits.get(n.athlete_id), n.season)) for n in found]
@@ -163,7 +163,7 @@ class RecruitModel:
         return path
 
     @classmethod
-    def load(cls, league: str, path: Path | None = None) -> "RecruitModel":
+    def load(cls, league: str, path: Path | None = None) -> RecruitModel:
         path = path or cls.release_path(league)
         raw = json.loads(path.read_text())
         if tuple(raw["features"]) != FEATURES:
