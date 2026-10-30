@@ -1,0 +1,8 @@
+# Changes here will be overwritten by Copier
+_commit: v1.0.0
+_src_path: gh:NathanDeMaria/mirrorball
+aws: true
+description: Player ratings for college basketball, from lineup-vs-lineup possessions
+kind: library
+module_name: ten_minute_version
+project_name: ten-minute-version

@@ -1,11 +1,14 @@
-__pycache__
-.venv
+__pycache__/
+.venv/
+dist/
+.pytest_cache/
+.ruff_cache/
 .env
 
-# Machine-local devcontainer settings -- the AWS_PROFILE to use, mainly.
-# local.env.example is the tracked copy that documents it.
+# Machine-local devcontainer settings; local.env.example is the tracked copy
 .devcontainer/local.env
 
+# This repo's own (the rules above are mirrorball's)
 logs/
 # A local copy of endgame's processed play-by-play (`make plays`), and what
 # gets built from it. Both are rebuildable output, not source.
