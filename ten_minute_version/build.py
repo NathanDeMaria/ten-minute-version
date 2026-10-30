@@ -57,6 +57,7 @@ from ten_minute_version.chain import (
 )
 from ten_minute_version.chain import development as chain_development
 from ten_minute_version.context import GameContext, context_table, read_context
+from ten_minute_version.divisions import GENERICS, division_generics, is_generic
 from ten_minute_version.estimate import Rules, nearest_action_floors, season_context
 from ten_minute_version.estimated import estimated_tables
 from ten_minute_version.evaluate import (
@@ -87,7 +88,6 @@ from ten_minute_version.newcomers import (
     normal_eb,
 )
 from ten_minute_version.opponents import (
-    GENERIC,
     Opponents,
     appearances,
     outside_side,
@@ -494,7 +494,8 @@ def _season_rows(
     """
     A season's stint rows (games with a summary only) and shots, if built --
     and with the estimated possessions of its games without substitutions,
-    if asked for and built.
+    if asked for and built. A generic side is its team's division's
+    (`divisions`).
     """
     directory = Path(tables) / f"league={league}" / f"season={season}"
     if not (directory / "shots.parquet").exists():
@@ -540,7 +541,10 @@ def _season_rows(
     combined = pa.concat_tables(tables_)
     games = combined.column("game_id").to_pylist()
     combined = combined.filter(pa.array([game_id in contexts for game_id in games]))
-    return Rows.build(combined, contexts), shots.to_pylist()
+    return (
+        Rows.build(combined, contexts, division_generics(league, season)),
+        shots.to_pylist(),
+    )
 
 
 _ROW_SCHEMA = pa.schema(
@@ -1551,7 +1555,7 @@ def newcomer_fits(
             if s < season
             for p in (r["athlete_id"] for r in found)
         }
-        new = [p not in before and p != GENERIC for p in design.players]
+        new = [p not in before and not is_generic(p) for p in design.players]
         pen = penalties(design, player=1000.0, team=30.0)
         mean = data["box"].copy()
         for i, is_new in enumerate(new):
@@ -1916,7 +1920,7 @@ def _available(
     for team in teams:
         games = season_games.before(team, as_of)
         expected = team_shares(observed, projected, team)
-        if not games.shares or GENERIC in expected:
+        if not games.shares or any(is_generic(p) for p in expected):
             continue
         healthy = healthy_shares(expected, games)
         chances = chances_in(league, list(healthy), games)
@@ -1989,10 +1993,12 @@ def team_ratings(
     season_games: SeasonGames | None = None
     day: dict[str, date] = {}
     row_day = np.array([], object)
+    generic = division_generics(league, first)
     for fit in _chain_fits(
         league, ChainSettings(), first, last, weeks, recruits, tables, cache
     ):
         if fit.week == 0:
+            generic = division_generics(league, fit.season)
             if floor is None:
                 before = _load_chain_cache(cache, league, fit.season - 1)
                 floor = Floor.build(before["rows"]) if before else None
@@ -2062,8 +2068,10 @@ def team_ratings(
                 net_sds(
                     fit.data["design"],
                     lower,
-                    {t: team_shares(observed, projected, t) for t in teams},
+                    {t: team_shares(observed, projected, t, generic) for t in teams},
+                    generic=generic,
                 ),
+                generic,
             )
         del lower
         if fit.week == 0:
@@ -2296,7 +2304,7 @@ def live(
     roster = sorted(
         set(listed) | {(p, t) for t, shares in played.items() for p in shares}
     )
-    roster = [(p, t) for p, t in roster if p != GENERIC]
+    roster = [(p, t) for p, t in roster if not is_generic(p)]
     x = np.array(
         [minutes_features(p, t, season, frozen.history) for p, t in roster]
     ).reshape(len(roster), len(MINUTES_FEATURES))
@@ -2305,8 +2313,9 @@ def live(
         projected.setdefault(team, {})[player] = share
     teams = sorted(set(projected) | set(played))
     unplayed = [t for t in teams if not games.get(t)]
+    generic = division_generics(league, season)
     blank = prior_design(
-        [p for p, _ in roster] + [GENERIC], [*frozen.last_end.teams, *unplayed]
+        [p for p, _ in roster] + list(GENERICS), [*frozen.last_end.teams, *unplayed]
     )
     prior_mean, prior_penalty = chained_priors(
         blank,
@@ -2341,8 +2350,10 @@ def live(
         sds=net_sds(
             blank,
             factor(blank, np.empty(0), prior_penalty),
-            {t: team_shares({}, projected, t) for t in unplayed},
+            {t: team_shares({}, projected, t, generic) for t in unplayed},
+            generic=generic,
         ),
+        generic=generic,
     )
     if fitted is not None:
         design, b, lower = fitted
@@ -2361,8 +2372,12 @@ def live(
             names,
             likely,
             net_sds(
-                design, lower, {t: team_shares(played, projected, t) for t in rated}
+                design,
+                lower,
+                {t: team_shares(played, projected, t, generic) for t in rated},
+                generic=generic,
             ),
+            generic,
         )
     path = Path(out) / f"{league}_player_ratings.csv"
     existing = (

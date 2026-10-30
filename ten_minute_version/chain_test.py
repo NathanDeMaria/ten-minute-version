@@ -69,6 +69,36 @@ def test_a_returner_starts_at_his_last_posterior_grown_and_widened():
     assert pen[t] == 30.0 and pen[design.baseline] == 0.0
 
 
+def test_a_generic_player_is_relearned_each_season_and_doesnt_grow():
+    rows, design = _design()
+    # "old" standing in for a division's generic player
+    renamed = Design(
+        design.row,
+        design.col,
+        design.val,
+        design.rows,
+        ["generic:d2" if p == "old" else p for p in design.players],
+        design.teams,
+    )
+    states = {"generic:d2": PlayerState(2023, -0.3, -0.2, 0.001**2, 0.001**2, 9)}
+    grown = {3: (0.004, 0.002)}
+    no_box = np.zeros(len(design.players), bool)
+    settings = replace(SETTINGS, generic_sd=5.0)
+    mean, pen = chained_priors(
+        renamed,
+        2024,
+        states,
+        _newcomer,
+        np.zeros(design.columns),
+        no_box,
+        settings,
+        grown,
+    )
+    o = renamed.player_column(renamed.players.index("generic:d2"), "offense")
+    assert np.isclose(mean[o], -0.3) and np.isclose(mean[o + 1], -0.2)
+    assert np.isclose(pen[o], 1 / (0.001**2 + 0.01**2 + 0.05**2))
+
+
 def test_the_season_end_fit_drifts_by_drift_sd_and_the_weeks_by_week_drift_sd():
     rows, design = _design()
     states = {"old": PlayerState(2023, 0.02, 0.01, 0.01**2, 0.015**2, 2)}

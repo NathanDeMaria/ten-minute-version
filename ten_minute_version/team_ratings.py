@@ -12,7 +12,8 @@ teams' possessions per game so far (`Floor.pace`):
 - **shares**: before a team's first game, `preseason.MinutesModel`'s
   projection over its roster; after, the share of its possessions each
   player has been on the floor for so far. A side the rows call generic
-  (`opponents`) is the generic player at weight 1, as they have it;
+  (`opponents`) is its division's generic player (`divisions`) at weight
+  1, as they have it;
 - **pace**: a team's possessions per game so far, averaged with two
   games at last season's (`shrunk_pace`).
 
@@ -29,7 +30,7 @@ it beats Cassandra's team-level Glicko on the same games: Brier 0.1573 ->
 """
 
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date
 
@@ -43,6 +44,13 @@ from .ratings import Design, Rows
 
 # player -> share of his team's floor time, a team's adding up to five
 Shares = Mapping[str, float]
+# a team -> the generic player it plays as (`divisions.division_generics`)
+Generic = Callable[[str], str]
+
+
+def plain_generic(team: str) -> str:
+    """`GENERIC` for every team: one generic player for all of them."""
+    return GENERIC
 
 
 @dataclass(frozen=True)
@@ -167,32 +175,40 @@ def team_shares(
     observed: Mapping[str, Shares],
     projected: Mapping[str, Shares],
     team: str,
+    generic: Generic = plain_generic,
 ) -> Shares:
     """A team's shares: as it's played so far, else as projected, else (a
-    team from outside Division I nobody projected) the generic player's."""
-    return observed.get(team) or projected.get(team) or {GENERIC: 1.0}
+    team from outside Division I nobody projected) its generic player's."""
+    return observed.get(team) or projected.get(team) or {generic(team): 1.0}
 
 
-def rated_shares(at: Mapping[str, int], shares: Shares) -> Shares:
-    """`shares` as a design whose players are `at` can rate them: a team none of whose players it
-    has is the generic player's. A team from outside Division I is projected
-    from its box scores before it plays, but its players were never rated --
-    every possession against it is the generic side's -- and summed over
-    nobody, it came out an average Division I team: 0 where it's -34 per
-    100 mens, -22 womens, in every opener against one."""
+def rated_shares(
+    at: Mapping[str, int], shares: Shares, generic: str = GENERIC
+) -> Shares:
+    """`shares` as a design whose players are `at` can rate them: a team
+    none of whose players it has is `generic`'s, its generic player. A team
+    from outside Division I is projected from its box scores before it
+    plays, but its players were never rated -- every possession against it
+    is the generic side's -- and summed over nobody, it came out an average
+    Division I team: 0 where it's -34 per 100 mens, -22 womens, in every
+    opener against one."""
     if any(p in at for p in shares):
         return shares
-    return {GENERIC: 1.0}
+    return {generic: 1.0}
 
 
 def team_sides(
-    design: Design, b: np.ndarray, team: str, shares: Shares
+    design: Design,
+    b: np.ndarray,
+    team: str,
+    shares: Shares,
+    generic: Generic = plain_generic,
 ) -> tuple[float, float]:
     """A team's (offense, defense) per possession under `b`: its players'
-    columns at their shares (`rated_shares`), plus its team column. A
-    player `design` doesn't have counts at 0."""
+    columns at their shares (`rated_shares`, at `generic` of it), plus its
+    team column. A player `design` doesn't have counts at 0."""
     at = {p: i for i, p in enumerate(design.players)}
-    shares = rated_shares(at, shares)
+    shares = rated_shares(at, shares, generic(team))
     offense = sum(s * b[2 * at[p]] for p, s in shares.items() if p in at)
     defense = sum(s * b[2 * at[p] + 1] for p, s in shares.items() if p in at)
     if team in design.teams:
@@ -207,6 +223,7 @@ def net_sds(
     lower: np.ndarray,
     sides: Mapping[str, Shares],
     sigma: float = SIGMA,
+    generic: Generic = plain_generic,
 ) -> dict[str, float]:
     """Each team's posterior sd of its net per possession at its shares in
     `sides` -- the same columns `team_sides` adds up -- from the fit's
@@ -218,7 +235,7 @@ def net_sds(
     teams = list(sides)
     mix = np.zeros((design.columns, len(teams)))
     for j, team in enumerate(teams):
-        for p, s in rated_shares(at, sides[team]).items():
+        for p, s in rated_shares(at, sides[team], generic(team)).items():
             if p in at:
                 mix[2 * at[p], j] += s
                 mix[2 * at[p] + 1, j] += s
@@ -288,17 +305,19 @@ def team_rating_rows(
     names: Mapping[str, str | None],
     available: Mapping[str, float] | None = None,
     sds: Mapping[str, float] | None = None,
+    generic: Generic = plain_generic,
 ) -> list[dict]:
     """One `TEAM_RATING_SCHEMA` row per team in `teams`, `pace` already
     filled in from last season's where a team has none of its own,
     `available` its net per possession over who might miss its next game,
     where known (`availability.expected_net`), and `sds` its net's posterior
-    sd per possession, where known (`net_sds`)."""
+    sd per possession, where known (`net_sds`); `generic` each team's
+    generic player."""
     edge = float(b[design.home]) * 100
     out = []
     for team in teams:
         offense, defense = team_sides(
-            design, b, team, team_shares(observed, projected, team)
+            design, b, team, team_shares(observed, projected, team, generic), generic
         )
         ready = (available or {}).get(team, offense + defense)
         sd = (sds or {}).get(team)

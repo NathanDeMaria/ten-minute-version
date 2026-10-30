@@ -43,6 +43,9 @@ them.
 Both are ratios rather than counts of games so they hold on part of a
 season: on opening day, when everyone has played once, no side is generic,
 and an outside team's possessions are left out as they were before.
+
+A generic side is `GENERIC` in the tables; the fits play it as its
+division's generic player (`divisions`).
 """
 
 from collections import Counter

@@ -1,6 +1,11 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.14"
+
+[[package]]
+name = "call-it-what-you-want"
+version = "0.1.0"
+source = { git = "https://github.com/NathanDeMaria/call-it-what-you-want.git?rev=d1622a577f9ab5ee61f58a91485d2a9dbab5b241#d1622a577f9ab5ee61f58a91485d2a9dbab5b241" }
 
 [[package]]
 name = "colorama"
@@ -243,6 +248,7 @@ name = "ten-minute-version"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "call-it-what-you-want" },
     { name = "numpy" },
     { name = "pyarrow" },
     { name = "scipy" },
@@ -258,6 +264,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "call-it-what-you-want", git = "https://github.com/NathanDeMaria/call-it-what-you-want.git?rev=d1622a577f9ab5ee61f58a91485d2a9dbab5b241" },
     { name = "numpy", specifier = ">=2.3.0" },
     { name = "pyarrow", specifier = ">=21.0.0" },
     { name = "scipy", specifier = ">=1.16" },

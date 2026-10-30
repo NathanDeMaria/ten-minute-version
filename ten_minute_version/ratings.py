@@ -14,8 +14,8 @@ per 100 possessions.
 
 - **Home edge** is +h for the home side's offense and -h for the away
   side's, nothing at a neutral site (from `context`).
-- **A generic team** (`opponents`) is one player, `GENERIC`, rated like any
-  other.
+- **A generic team** (`opponents`) is one player, rated like any other:
+  its division's (`divisions`), where `Rows.build` is told each team's.
 - **The target** is the row's points, its expected points, or a blend
   (`Targets`): expected points take the luck out of shooting, but only a
   shooter's luck -- a shooter better than the model's average keeps credit
@@ -25,6 +25,7 @@ Solved by conjugate gradient on the normal equations, with nothing but
 numpy: ~370,000 rows and ~10,000 ratings fit in seconds.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from functools import cached_property
 from typing import Mapping, Sequence
@@ -34,6 +35,7 @@ import pyarrow as pa
 from scipy import sparse
 
 from .context import GameContext
+from .divisions import is_generic
 from .opponents import GENERIC
 from .shot_model import (
     Shots,
@@ -68,7 +70,14 @@ class Rows:
     index: Mapping[tuple[str, int, str], int]
 
     @classmethod
-    def build(cls, stints: pa.Table, contexts: Mapping[str, GameContext]) -> "Rows":
+    def build(
+        cls,
+        stints: pa.Table,
+        contexts: Mapping[str, GameContext],
+        generic: Callable[[str], str] | None = None,
+    ) -> "Rows":
+        """The table's rows; a generic side as `generic` of its team
+        (`divisions.division_generics`), if given, else as the table has it."""
         t = stints.to_pydict()
         n = len(t["game_id"])
         home_side = np.array([side == "home" for side in t["offense_side"]])
@@ -90,11 +99,19 @@ class Rows:
                 return [list(w) for w in t[column]]
             return [[1.0] * len(five) for five in t[players]]
 
+        def sides(players: str, teams: np.ndarray) -> list[list[str]]:
+            if generic is None:
+                return t[players]
+            return [
+                [generic(team)] if five == [GENERIC] and team else five
+                for five, team in zip(t[players], teams)
+            ]
+
         return cls(
             game_id=np.array(t["game_id"], object),
             offense_home=home_side,
-            offense=t["offense_players"],
-            defense=t["defense_players"],
+            offense=sides("offense_players", offense_team),
+            defense=sides("defense_players", defense_team),
             offense_weights=weights("offense_weights", "offense_players"),
             defense_weights=weights("defense_weights", "defense_players"),
             possessions=np.array(t["possessions"], float),
@@ -333,8 +350,11 @@ def targets(rows: Rows, shot_rows: Sequence[Mapping], train_games: set[str]) -> 
     # A generic side's shooters are one shooter. Each takes a few shots
     # against Division I all season, so alone he's shrunk to the average --
     # Division I's, well above his -- and the targets would credit generic
-    # sides with ~3-4 points per 100 they never scored.
-    generic = np.array([r >= 0 and GENERIC in rows.offense[r] for r in row_of])
+    # sides with ~3-4 points per 100 they never scored. One for every
+    # division, as the division generics were tested on.
+    generic = np.array(
+        [r >= 0 and any(is_generic(p) for p in rows.offense[r]) for r in row_of]
+    )
     if generic.any():
         shots = replace(shots, shooter=np.where(generic, GENERIC, shots.shooter))
     games = np.array([s["game_id"] for s in shot_rows], object)

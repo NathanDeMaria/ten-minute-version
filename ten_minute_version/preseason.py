@@ -34,6 +34,7 @@ from datetime import date
 
 import numpy as np
 
+from .divisions import is_generic
 from .recruiting import Recruit, RecruitModel
 from .recruiting import features as recruit_features
 
@@ -171,7 +172,7 @@ def team_term(
     out = np.zeros(len(games))
 
     def side(team: str, five: Sequence[str], k: int) -> float:
-        if list(five) == ["generic"]:
+        if len(five) == 1 and is_generic(five[0]):
             return generic[k]
         rated = ratings.get(team)
         return rated[k] if rated is not None else 0.0

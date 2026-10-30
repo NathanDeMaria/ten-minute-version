@@ -13,7 +13,14 @@ dependencies = [
     # with Newton steps, so numpy rather than a solver.
     "numpy>=2.3.0",
     "scipy>=1.16",
+    # Which division a team from outside Division I is in (`divisions`).
+    # Unpinned here, so Cassandra's pin is the one it installs beside this
+    # package; this repo's own environment pins it below.
+    "call-it-what-you-want",
 ]
+
+[tool.uv.sources]
+call-it-what-you-want = { git = "https://github.com/NathanDeMaria/call-it-what-you-want.git", rev = "d1622a577f9ab5ee61f58a91485d2a9dbab5b241" }
 
 [dependency-groups]
 dev = [
