@@ -5,6 +5,7 @@ from .context import GameContext, Team
 from .posterior import (
     Reported,
     covariance,
+    covariance_from,
     gram,
     main_teams,
     split_half,
@@ -130,3 +131,9 @@ def test_split_halves_differ_as_much_as_the_model_says():
         squared.append(found.difference**2)
     ratio = np.mean(squared) / np.mean(found.predicted)
     assert 0.85 < ratio < 1.15
+
+
+def test_a_covariance_from_a_factor_is_the_covariance():
+    a = np.array([[4.0, 1.0, 0.5], [1.0, 3.0, 0.25], [0.5, 0.25, 2.0]])
+    lower = np.linalg.cholesky(a)
+    assert np.allclose(covariance_from(lower, sigma=2.0), 4 * np.linalg.inv(a))

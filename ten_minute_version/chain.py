@@ -331,6 +331,9 @@ CHAINED_SCHEMA = pa.schema(
         pa.field("offense_sd", pa.float32(), nullable=False),
         pa.field("defense_sd", pa.float32(), nullable=False),
         pa.field("total_sd", pa.float32(), nullable=False),
+        # his columns alone: what he adds to his team, without its fifth
+        pa.field("offense_vs_team", pa.float32(), nullable=False),
+        pa.field("defense_vs_team", pa.float32(), nullable=False),
     ]
 )
 
@@ -372,6 +375,8 @@ def chained_table(
                 "defense_sd": 100 * np.sqrt(var_defense[i]),
                 "total_sd": 100
                 * np.sqrt(var_offense[i] + var_defense[i] + 2 * both[i]),
+                "offense_vs_team": 100 * b[reported.offense[i]],
+                "defense_vs_team": 100 * b[reported.defense[i]],
             }
         )
     return pa.Table.from_pylist(out, schema=CHAINED_SCHEMA)

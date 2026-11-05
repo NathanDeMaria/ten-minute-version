@@ -102,6 +102,21 @@ def covariance(
     return sigma**2 * spd_inverse(precision(gram(design, weight), penalty))
 
 
+def covariance_from(lower: np.ndarray, sigma: float = SIGMA) -> np.ndarray:
+    """`covariance`, from a fit's Cholesky factor (`factor`), which it uses
+    up: late in a season the matrix is over a gigabyte, and a morning's job
+    has room for very few of them."""
+    (potri,) = get_lapack_funcs(("potri",), (lower,))
+    inverse, info = potri(lower, lower=True, overwrite_c=True)
+    if info != 0:
+        raise np.linalg.LinAlgError(f"singular (potri {info})")
+    # potri fills the lower triangle only
+    for j in range(len(inverse) - 1):
+        inverse[j, j + 1 :] = inverse[j + 1 :, j]
+    inverse *= sigma**2
+    return inverse
+
+
 def residual_variance(
     design: Design, target: np.ndarray, weight: np.ndarray, b: np.ndarray
 ) -> float:
