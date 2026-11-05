@@ -42,12 +42,20 @@ def test_appearances_count_games_not_plays():
     assert (seen["h1"], seen["h2"], seen["a1"]) == (2, 1, 1)
 
 
-def _team(team_id: str) -> Team:
-    return Team(team_id, team_id, None, None, division_one=True)
+def _team(team_id: str, division_one: bool = True) -> Team:
+    return Team(team_id, team_id, None, None, division_one=division_one)
 
 
-def _game(game_id: str, home: str, away: str, conference: bool = False):
-    return GameContext(game_id, False, conference, _team(home), _team(away))
+def _game(
+    game_id: str,
+    home: str,
+    away: str,
+    conference: bool = False,
+    away_d1: bool = True,
+):
+    return GameContext(
+        game_id, False, conference, _team(home), _team(away, division_one=away_d1)
+    )
 
 
 def _schedule(*games: GameContext) -> dict[str, GameContext]:
@@ -80,3 +88,29 @@ def test_the_schedule_decides_where_a_game_has_a_summary():
     assert Opponents(seen, contexts).generic_side(game(*starters_act())) is None
     # Without the summary, the players decide.
     assert Opponents(seen).generic_side(game(*starters_act())) == "away"
+
+
+def test_an_opener_against_a_team_from_outside_is_generic_by_espns_flag():
+    # Opening day: d1's first game against o's first. No ratio can tell.
+    opener = _game("opener", "d1", "o", away_d1=False)
+    found = schedules([opener])
+    assert outside_side(opener, found) == "away"
+    # Two D1 teams' openers: neither.
+    both = _game("both", "d1", "d2")
+    assert outside_side(both, schedules([both])) is None
+
+
+def test_the_flag_gives_way_once_the_schedules_can_say():
+    # A full season: d1 and d2 play ten. A team ESPN files outside but that
+    # played as often -- the flag is wrong -- isn't generic.
+    played = [_game(f"g{i}", "d1", "d2") for i in range(5)]
+    flagged = [_game(f"f{i}", "d1", "x", away_d1=False) for i in range(5)]
+    more = [_game(f"m{i}", "d2", "x", away_d1=False) for i in range(5)]
+    found = schedules([*played, *flagged, *more])
+    assert outside_side(flagged[0], found) is None
+
+
+def test_an_early_conference_game_is_not_generic_by_the_flag():
+    # 2020-21 style: a team ESPN files outside, in its conference.
+    game_ = _game("c", "d1", "o", conference=True, away_d1=False)
+    assert outside_side(game_, schedules([game_])) is None

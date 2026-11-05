@@ -41,8 +41,18 @@ plays, and those are missing for some teams far more than others: it plays
 them.
 
 Both are ratios rather than counts of games so they hold on part of a
-season: on opening day, when everyone has played once, no side is generic,
-and an outside team's possessions are left out as they were before.
+season -- except its first days, when everyone has played once or twice and
+no ratio can tell: an outside team in its opener against a D1 team in its
+own is 1 game against 1. **Until the busier team has played `EARLY_GAMES`
+games**, then, a summary's side that ESPN files outside Division I, against
+one it files in, is generic if its team has played no conference game.
+That's the flag the schedule rule replaced, but only for the current
+season, where it's right (`context`): a full season's schedules always
+reach `EARLY_GAMES`, so a backfill never reads it. Without it, 2026-27's
+first days played all 65 mens outside-vs-D1 games as two sides of players
+-- every outside team a roster of newcomers near a D1 average (Whittier,
+-51 per 100 at 2025-26's end, filed at -2), and every D1 team credited for
+a blowout of one.
 
 A generic side is `GENERIC` in the tables; the fits play it as its
 division's generic player (`divisions`).
@@ -65,6 +75,9 @@ GENERIC = "generic"
 TEAM_CUTOFF = 0.6
 # ...or, without a summary, of the other side's typical player's.
 CUTOFF = 0.4
+# Below this many games for the busier of a game's two teams, its schedule
+# can't say which is from outside, and ESPN's flag does (`outside_side`).
+EARLY_GAMES = 6
 
 
 @dataclass(frozen=True)
@@ -112,12 +125,22 @@ def schedules(contexts: Iterable[GameContext]) -> dict[str, Schedule]:
 
 
 def outside_side(context: GameContext, schedules: Mapping[str, Schedule]) -> str | None:
-    """The side of a game whose team's schedule says it's from outside D1."""
+    """The side of a game whose team's schedule says it's from outside D1 --
+    or, before either schedule can say, ESPN's flag does."""
     for side in SIDES:
         mine = schedules.get(context.team(side).team_id, Schedule())
         theirs = schedules.get(context.team(other(side)).team_id, Schedule())
         if not mine.conference_games and mine.games < TEAM_CUTOFF * theirs.games:
             return side
+    busier = max(
+        schedules.get(context.team(side).team_id, Schedule()).games for side in SIDES
+    )
+    if busier < EARLY_GAMES:
+        outside = [side for side in SIDES if not context.team(side).division_one]
+        if len(outside) == 1:
+            mine = schedules.get(context.team(outside[0]).team_id, Schedule())
+            if not mine.conference_games:
+                return outside[0]
     return None
 
 
