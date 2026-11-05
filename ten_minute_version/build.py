@@ -19,6 +19,7 @@ in `ten_minute_version/releases/`.
 
 import json
 import pickle
+import traceback
 import zlib
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
@@ -93,11 +94,21 @@ from ten_minute_version.opponents import (
     outside_side,
     schedules,
 )
+from ten_minute_version.players import (
+    FIRST_SEASON,
+    fitted_team_sides,
+    played_rows,
+    players_path,
+    prior_team_sides,
+    waiting_rows,
+    write_players,
+)
 from ten_minute_version.plays import read_games
 from ten_minute_version.posterior import (
     SIGMA,
     Reported,
     covariance,
+    covariance_from,
     factor,
     split_half,
     variances,
@@ -815,11 +826,19 @@ def rosters(
     the season before (`rosters`), or just `teams`: `roster.parquet` in the
     season's tables. ESPN only serves current rosters, so `season` is the
     one about to start; a team whose roster ESPN hasn't moved on to it yet
-    is left out, and named.
+    is left out, and named. Just `teams` keeps every other team's rows in the
+    file: a morning stops fetching a team once it's played, and that last
+    roster is who the players' table has for it (`players`).
     """
+    rows = []
     if teams is None:
         teams = _division_one(read_context(summaries, league, season - 1))
-    rows = []
+    else:
+        path = Path(tables) / f"league={league}" / f"season={season}" / "roster.parquet"
+        if path.exists():
+            rows = [
+                r for r in pq.read_table(path).to_pylist() if r["team_id"] not in teams
+            ]
     stale = []
     for k, team in enumerate(teams):
         response = fetch_roster(root, league, season, team, refetch)
@@ -2396,6 +2415,131 @@ def live(
         f"{league} {cut}: {len(new)} teams, {len(teams) - len(unplayed)} played;"
         f" wrote {path}"
     )
+    # After the file predictions read is safe: a page's table is worth a
+    # morning's log line, not its ratings.
+    try:
+        _write_live_players(
+            league,
+            season,
+            cut,
+            None
+            if fitted is None
+            else (design, rows, rows.possessions * train, b, lower),
+            blank,
+            prior_mean,
+            prior_penalty,
+            roster,
+            projected,
+            names,
+            summaries,
+            tables,
+            out,
+        )
+    except Exception:
+        traceback.print_exc()
+        print(f"{league} {cut}: no players' table")
+
+
+def _write_live_players(
+    league: str,
+    season: int,
+    cut: date,
+    fit: tuple[Design, Rows, np.ndarray, np.ndarray, np.ndarray] | None,
+    blank: Design,
+    prior_mean: np.ndarray,
+    prior_penalty: np.ndarray,
+    roster: list[tuple[str, str]],
+    projected: Mapping[str, Mapping[str, float]],
+    teams: Mapping[str, str | None],
+    summaries: str,
+    tables: str,
+    out: str,
+) -> None:
+    """A morning's players' table (`ten_minute_version.players`): everyone
+    rated so far, and everyone on a roster who isn't, at his prior."""
+    directory = Path(tables) / f"league={league}" / f"season={season}"
+    names = {r["athlete_id"]: r["name"] for r in _roster_rows(directory)}
+    found = directory / "players.parquet"
+    if found.exists():
+        names |= {
+            r["athlete_id"]: r["athlete_name"]
+            for r in pq.read_table(found).to_pylist()
+            if r["athlete_name"]
+        }
+    sides = prior_team_sides(blank, prior_mean, prior_penalty)
+    rated: list[dict] = []
+    if fit is not None:
+        design, rows, weight, b, lower = fit
+        cov = covariance_from(lower)
+        sides |= fitted_team_sides(design, b, cov)
+        rated = played_rows(
+            chained_table(
+                league,
+                season,
+                design,
+                Reported.build(rows, design),
+                b,
+                cov,
+                design.column_squares(weight),
+                names,
+            ).to_pylist(),
+            season_minutes(summaries, league, season, before=cut).to_pylist(),
+            teams,
+            cut,
+        )
+    seen = {r["athlete_id"] for r in rated}
+    waiting = waiting_rows(
+        league,
+        season,
+        cut,
+        [(p, t) for p, t in roster if p not in seen],
+        projected,
+        blank,
+        prior_mean,
+        prior_penalty,
+        sides,
+        names,
+        teams,
+    )
+    path = players_path(out, league, season)
+    write_players(path, rated + waiting)
+    print(f"{league} {cut}: {len(rated)} played, {len(waiting)} waiting; wrote {path}")
+
+
+def _roster_rows(directory: Path) -> list[dict]:
+    path = directory / "roster.parquet"
+    return pq.read_table(path).to_pylist() if path.exists() else []
+
+
+def players(
+    league: str,
+    first: int | None = None,
+    last: int = 2025,
+    summaries: str = "./summaries",
+    tables: str = "./stints",
+    out: str = "./team-ratings",
+):
+    """
+    Each finished season's players' table (`ten_minute_version.players`), from
+    its `chained_ratings.parquet` (`chain`) and `minutes.parquet` (`minutes`):
+    `{out}/{league}_players_{season}.csv`, from the league's first season
+    worth showing unless `first` says otherwise.
+    """
+    for season in range(FIRST_SEASON[league] if first is None else first, last + 1):
+        directory = Path(tables) / f"league={league}" / f"season={season}"
+        teams = {
+            c.team(side).team_id: c.team(side).name
+            for c in read_context(summaries, league, season).values()
+            for side in ("home", "away")
+        }
+        rows = played_rows(
+            pq.read_table(directory / "chained_ratings.parquet").to_pylist(),
+            pq.read_table(directory / "minutes.parquet").to_pylist(),
+            teams,
+        )
+        path = players_path(out, league, season)
+        write_players(path, rows)
+        print(f"{league} {season}: {len(rows)} players; wrote {path}", flush=True)
 
 
 def luck(
@@ -2565,6 +2709,7 @@ COMMANDS = {
     "live_kit": live_kit,
     "live": live,
     "morning": morning,
+    "players": players,
     "evaluate": evaluate,
     "fit": fit,
 }

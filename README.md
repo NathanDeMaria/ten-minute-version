@@ -462,3 +462,17 @@ A season's teams are known about a point and a half better (mens) and two points
 season after COVID. That's about what last season's ratings on this season's real
 lineups get (13.20 and 15.20 above): knowing the roster and roughly how minutes go
 is nearly as good as knowing who actually played.
+
+## Every player: the players' table
+
+`{league}_players_{season}.csv` (`players`) is every player of a season, for reading:
+his chained rating with its sd, the same without his team's fifth (`vs_team`), and his
+games, starts, minutes and share of his team's time from the box scores. It's what
+invisible-string's Players page shows. `build.py players` writes finished seasons from
+`chain`'s and `minutes`' tables (mens from 2013-14, womens from 2019-20, when
+play-by-play reaches their games); `morning` rewrites the current one.
+
+A player on a roster who hasn't played is at his prior, at his projected share, and
+marked `projected`. A morning only fetches the rosters of teams that haven't played, so
+it keeps the other teams' last rows in `roster.parquet`. That's all this adds to a
+morning's team ratings: none of them change, as a played team's shares are who's played.

@@ -94,16 +94,21 @@ MINUTES_SCHEMA = pa.schema(
 )
 
 
-def season_minutes(root: str | Path, league: str, season: int) -> pa.Table:
+def season_minutes(
+    root: str | Path, league: str, season: int, before: date | None = None
+) -> pa.Table:
     """
     Each player's minutes for each team he played for in a season, from the
     box scores: one row per player and team (`MINUTES_SCHEMA`), for the
-    preseason projection (`preseason`).
+    preseason projection (`preseason`) and the players' table (`players`).
+    `before`: only the games before that day.
     """
     totals: dict[tuple[str, str], list] = {}
     team_minutes: dict[str, float] = {}
     for game_id, summary in read_summaries(root, league, season):
         day = _date(summary)
+        if before is not None and (day is None or day >= before):
+            continue
         for line in parse_box_lines(game_id, summary):
             minutes = max(line.stats["minutes"], 0.0)
             seen = totals.setdefault((line.athlete_id, line.team_id), [0.0, 0, 0, day])

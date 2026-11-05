@@ -217,6 +217,28 @@ def test_the_chained_table_reports_sds_per_100():
     assert np.isclose(row["offense_sd"], 100 * np.sqrt(1e-4 * (1 + 1 / 25)), rtol=1e-5)
 
 
+def test_the_chained_table_keeps_a_players_own_columns_apart_from_his_teams():
+    rows, design = _design()
+    reported = Reported.build(rows, design)
+    b = np.zeros(design.columns)
+    i = design.players.index("new")
+    b[design.player_column(i, "offense")] = 0.02
+    b[design.team_column(design.teams.index("H"), "offense")] = 0.05
+    table = chained_table(
+        "mens",
+        2024,
+        design,
+        reported,
+        b,
+        np.eye(design.columns) * 1e-4,
+        design.column_squares(rows.possessions),
+        {},
+    ).to_pylist()
+    row = next(r for r in table if r["athlete_id"] == "new")
+    assert np.isclose(row["offense"], 3.0)
+    assert np.isclose(row["offense_vs_team"], 2.0)
+
+
 def test_the_home_edge_and_some_of_each_team_carry_from_the_last_season():
     rows, design = _design()
     no_box = np.zeros(len(design.players), bool)
