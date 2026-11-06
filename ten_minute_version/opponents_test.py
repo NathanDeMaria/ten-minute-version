@@ -63,8 +63,8 @@ def _schedule(*games: GameContext) -> dict[str, GameContext]:
 
 
 def test_a_team_that_plays_a_few_of_the_seasons_games_is_generic():
-    # D1 teams d1 and d2 play ten games each; o plays d1 once.
-    played = [_game(f"g{i}", "d1", "d2") for i in range(9)]
+    # D1 teams d1 and d2 play twenty games each; o plays d1 once.
+    played = [_game(f"g{i}", "d1", "d2") for i in range(19)]
     visit = _game("visit", "d1", "o")
     found = schedules([*played, visit])
     assert outside_side(visit, found) == "away"
@@ -101,13 +101,22 @@ def test_an_opener_against_a_team_from_outside_is_generic_by_espns_flag():
 
 
 def test_the_flag_gives_way_once_the_schedules_can_say():
-    # A full season: d1 and d2 play ten. A team ESPN files outside but that
+    # A full season: d1 and d2 play twenty. A team ESPN files outside but that
     # played as often -- the flag is wrong -- isn't generic.
-    played = [_game(f"g{i}", "d1", "d2") for i in range(5)]
-    flagged = [_game(f"f{i}", "d1", "x", away_d1=False) for i in range(5)]
-    more = [_game(f"m{i}", "d2", "x", away_d1=False) for i in range(5)]
+    played = [_game(f"g{i}", "d1", "d2") for i in range(10)]
+    flagged = [_game(f"f{i}", "d1", "x", away_d1=False) for i in range(10)]
+    more = [_game(f"m{i}", "d2", "x", away_d1=False) for i in range(10)]
     found = schedules([*played, *flagged, *more])
     assert outside_side(flagged[0], found) is None
+
+
+def test_a_d1_team_a_game_behind_early_on_is_not_generic():
+    # 2026-11-02: USC's opener against Milwaukee's second game. One is under
+    # 60% of two, and USC's players had played as a generic team.
+    behind = _game("behind", "usc", "mil")
+    earlier = _game("earlier", "mil", "d2")
+    found = schedules([behind, earlier])
+    assert outside_side(behind, found) is None
 
 
 def test_an_early_conference_game_is_not_generic_by_the_flag():
