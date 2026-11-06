@@ -7,7 +7,8 @@ few teams from outside it -- NAIA, Division II and III. Most of their
 players have no ESPN record, so their plays carry no athlete id and their
 side of the floor can't be followed.
 
-**By the team's schedule**, where the game has a summary (`context`). The
+**By the team's schedule**, once the busier team has played `EARLY_GAMES`,
+where the game has a summary (`context`). The
 summaries hold every game a D1 team played, so they say how many of the
 season's games each team was in: a D1 team ~30, a team from outside at most
 13 (Virginia Lynchburg's men in 2024-25). A side is generic when its team
@@ -76,8 +77,11 @@ TEAM_CUTOFF = 0.6
 # ...or, without a summary, of the other side's typical player's.
 CUTOFF = 0.4
 # Below this many games for the busier of a game's two teams, its schedule
-# can't say which is from outside, and ESPN's flag does (`outside_side`).
-EARLY_GAMES = 6
+# can't say which is from outside, and ESPN's flag does (`outside_side`). One
+# game against a team with two is under the cutoff: on 2025-26's schedules so
+# far, 5 to 26 mens and 12 to 34 womens D1 sides a week in the first month, none
+# by 15 games, nor any outside team this leaves unflagged.
+EARLY_GAMES = 15
 
 
 @dataclass(frozen=True)
@@ -127,11 +131,6 @@ def schedules(contexts: Iterable[GameContext]) -> dict[str, Schedule]:
 def outside_side(context: GameContext, schedules: Mapping[str, Schedule]) -> str | None:
     """The side of a game whose team's schedule says it's from outside D1 --
     or, before either schedule can say, ESPN's flag does."""
-    for side in SIDES:
-        mine = schedules.get(context.team(side).team_id, Schedule())
-        theirs = schedules.get(context.team(other(side)).team_id, Schedule())
-        if not mine.conference_games and mine.games < TEAM_CUTOFF * theirs.games:
-            return side
     busier = max(
         schedules.get(context.team(side).team_id, Schedule()).games for side in SIDES
     )
@@ -141,6 +140,12 @@ def outside_side(context: GameContext, schedules: Mapping[str, Schedule]) -> str
             mine = schedules.get(context.team(outside[0]).team_id, Schedule())
             if not mine.conference_games:
                 return outside[0]
+        return None
+    for side in SIDES:
+        mine = schedules.get(context.team(side).team_id, Schedule())
+        theirs = schedules.get(context.team(other(side)).team_id, Schedule())
+        if not mine.conference_games and mine.games < TEAM_CUTOFF * theirs.games:
+            return side
     return None
 
 
