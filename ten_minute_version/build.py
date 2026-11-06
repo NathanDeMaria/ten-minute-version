@@ -20,6 +20,7 @@ in `ten_minute_version/releases/`.
 import json
 import pickle
 import traceback
+import urllib.error
 import zlib
 from collections import Counter
 from collections.abc import Callable, Iterator, Mapping
@@ -826,7 +827,7 @@ def rosters(
     the season before (`rosters`), or just `teams`: `roster.parquet` in the
     season's tables. ESPN only serves current rosters, so `season` is the
     one about to start; a team whose roster ESPN hasn't moved on to it yet
-    is left out, and named. Just `teams` keeps every other team's rows in the
+    is left out, and named, as is one ESPN has no page for. Just `teams` keeps every other team's rows in the
     file: a morning stops fetching a team once it's played, and that last
     roster is who the players' table has for it (`players`).
     """
@@ -841,7 +842,15 @@ def rosters(
             ]
     stale = []
     for k, team in enumerate(teams):
-        response = fetch_roster(root, league, season, team, refetch)
+        try:
+            response = fetch_roster(root, league, season, team, refetch)
+        except urllib.error.HTTPError as error:
+            # ESPN 404s some teams' rosters, some of them only for a while:
+            # no reason to lose every other team's, or a morning's ratings.
+            if error.code != 404:
+                raise
+            stale.append(team)
+            continue
         if roster_current(response, season):
             rows += roster_rows(team, response)
         else:

@@ -1,8 +1,13 @@
+import urllib.error
 from datetime import date
+from email.message import Message
 
 import numpy as np
 import pyarrow.csv
+import pyarrow.parquet as pq
+import pytest
 
+from . import build
 from .live import prior_design
 from .players import (
     PLAYER_SCHEMA,
@@ -144,3 +149,47 @@ def test_the_file_reads_back_best_first(tmp_path):
         path, convert_options=pyarrow.csv.ConvertOptions(column_types=PLAYER_SCHEMA)
     ).to_pylist()
     assert [r["athlete_id"] for r in table] == ["high", "low"]
+
+
+def _http_error(code: int) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError("u", code, "no", Message(), None)
+
+
+def _roster_response(athlete: str) -> dict:
+    return {"season": {"year": 2027}, "athletes": [{"id": athlete}]}
+
+
+def test_a_mornings_rosters_keep_the_teams_it_didnt_fetch(tmp_path, monkeypatch):
+    fetched = {"A": _roster_response("old"), "B": _roster_response("b")}
+    monkeypatch.setattr(
+        build, "fetch_roster", lambda root, league, season, team, again: fetched[team]
+    )
+    tables = str(tmp_path)
+    build.rosters("mens", 2026, tables=tables, teams=["A", "B"])
+    fetched["B"] = _roster_response("new")
+    build.rosters("mens", 2026, tables=tables, teams=["B"])
+    path = tmp_path / "league=mens" / "season=2026" / "roster.parquet"
+    found = {r["team_id"]: r["athlete_id"] for r in pq.read_table(path).to_pylist()}
+    assert found == {"A": "old", "B": "new"}
+
+
+def _fetch_404(root, league, season, team, refetch):
+    if team == "gone":
+        raise _http_error(404)
+    return _roster_response("a")
+
+
+def test_a_team_espn_has_no_roster_for_is_left_out(tmp_path, monkeypatch):
+    monkeypatch.setattr(build, "fetch_roster", _fetch_404)
+    build.rosters("mens", 2026, tables=str(tmp_path), teams=["gone", "here"])
+    path = tmp_path / "league=mens" / "season=2026" / "roster.parquet"
+    assert [r["team_id"] for r in pq.read_table(path).to_pylist()] == ["here"]
+
+
+def test_any_other_roster_error_still_stops_a_run(tmp_path, monkeypatch):
+    def fail(root, league, season, team, refetch):
+        raise _http_error(403)
+
+    monkeypatch.setattr(build, "fetch_roster", fail)
+    with pytest.raises(urllib.error.HTTPError):
+        build.rosters("mens", 2026, tables=str(tmp_path), teams=["a"])
