@@ -98,6 +98,7 @@ from ten_minute_version.opponents import (
 from ten_minute_version.players import (
     FIRST_SEASON,
     fitted_team_sides,
+    play_chances,
     played_rows,
     players_path,
     prior_team_sides,
@@ -2255,6 +2256,7 @@ def live(
     pace: dict[str, float] = {}
     likely: dict[str, float] = {}
     fitted: tuple[Design, np.ndarray, np.ndarray] | None = None
+    season_games: SeasonGames | None = None
     built = _season_rows(league, season, summaries, tables, with_estimated=True)
     if built is not None:
         rows, shot_rows = built
@@ -2311,6 +2313,7 @@ def live(
             played = floor.shares(train)
             games = floor.games(train)
             pace = floor.pace(train)
+            season_games = SeasonGames.build(floor, day)
             likely = _available(
                 league,
                 design,
@@ -2318,7 +2321,7 @@ def live(
                 sorted(played),
                 played,
                 {},
-                SeasonGames.build(floor, day),
+                season_games,
                 cut,
             )
     listed = (
@@ -2440,6 +2443,7 @@ def live(
             roster,
             projected,
             names,
+            season_games,
             summaries,
             tables,
             out,
@@ -2460,6 +2464,7 @@ def _write_live_players(
     roster: list[tuple[str, str]],
     projected: Mapping[str, Mapping[str, float]],
     teams: Mapping[str, str | None],
+    season_games: SeasonGames | None,
     summaries: str,
     tables: str,
     out: str,
@@ -2476,6 +2481,7 @@ def _write_live_players(
             if r["athlete_name"]
         }
     sides = prior_team_sides(blank, prior_mean, prior_penalty)
+    chances = play_chances(league, roster, season_games, cut)
     rated: list[dict] = []
     if fit is not None:
         design, rows, weight, b, lower = fit
@@ -2495,6 +2501,7 @@ def _write_live_players(
             season_minutes(summaries, league, season, before=cut).to_pylist(),
             teams,
             cut,
+            chances,
         )
     seen = {r["athlete_id"] for r in rated}
     waiting = waiting_rows(
@@ -2509,6 +2516,7 @@ def _write_live_players(
         sides,
         names,
         teams,
+        chances=chances,
     )
     path = players_path(out, league, season)
     write_players(path, rated + waiting)

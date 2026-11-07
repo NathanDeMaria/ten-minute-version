@@ -476,3 +476,7 @@ A player on a roster who hasn't played is at his prior, at his projected share, 
 marked `projected`. A morning only fetches the rosters of teams that haven't played, so
 it keeps the other teams' last rows in `roster.parquet`. That's all this adds to a
 morning's team ratings: none of them change, as a played team's shares are who's played.
+
+A morning's rows also carry `play_chance`, his chance of playing the team's next game
+(`availability`). ESPN's roster injury field was empty for every player on 2026-11-06, so
+this is an estimate from missed games and last-game minutes, not a report.

@@ -1,6 +1,8 @@
 import urllib.error
 from datetime import date
 from email.message import Message
+from types import SimpleNamespace
+from typing import cast
 
 import numpy as np
 import pyarrow.csv
@@ -8,11 +10,13 @@ import pyarrow.parquet as pq
 import pytest
 
 from . import build
+from .availability import OUT_CHANCE, SeasonGames
 from .live import prior_design
 from .players import (
     PLAYER_SCHEMA,
     TeamSides,
     fitted_team_sides,
+    play_chances,
     played_rows,
     players_path,
     prior_team_sides,
@@ -193,3 +197,30 @@ def test_any_other_roster_error_still_stops_a_run(tmp_path, monkeypatch):
     monkeypatch.setattr(build, "fetch_roster", fail)
     with pytest.raises(urllib.error.HTTPError):
         build.rosters("mens", 2026, tables=str(tmp_path), teams=["a"])
+
+
+def test_a_players_chance_of_playing_reads_his_teams_games_so_far():
+    class Games:
+        def before(self, team, day):
+            return SimpleNamespace(shares=[{"both": 0.5}, {"both": 0.5}])
+
+    games = cast(SeasonGames, Games())
+    day = date(2026, 11, 7)
+    found = play_chances("mens", [("both", "T"), ("nope", "T")], games, day)
+    assert np.isclose(
+        found[("both", "T")], 1 - OUT_CHANCE["mens"]["played, last at >=75"]
+    )
+    assert np.isclose(found[("nope", "T")], 1 - OUT_CHANCE["mens"]["not yet played"])
+
+
+def test_before_anyone_has_played_it_is_a_first_game():
+    found = play_chances("womens", [("p", "T")], None, date(2026, 10, 25))
+    assert np.isclose(found[("p", "T")], 1 - OUT_CHANCE["womens"]["first game"])
+
+
+def test_the_chance_lands_on_his_row_and_a_finished_season_has_none():
+    chances = {("a", "T"): 0.9}
+    [row] = played_rows([_chained("a")], [], {}, chances=chances)
+    assert row["play_chance"] == 0.9
+    [row] = played_rows([_chained("a")], [], {})
+    assert row["play_chance"] is None
