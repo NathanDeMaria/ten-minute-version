@@ -39,14 +39,16 @@ ratings' targets found.
 
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.csv
 
+from .box_scores import BoxLine
 from .context import GameContext
+from .flow import GameFlow, flow_values
 from .ratings import Rows, Targets
 
 LUCK_SCHEMA = pa.schema(
@@ -63,11 +65,27 @@ LUCK_SCHEMA = pa.schema(
         pa.field("luck", pa.float32(), nullable=False),
         # the cut it was fitted at: on the games before it
         pa.field("as_of", pa.date32(), nullable=False),
+        # `flow`'s readings of the game, each in points toward the home
+        # side; empty for a game whose plays don't give them
+        pa.field("jumpers", pa.float32()),
+        pa.field("over_lead", pa.float32()),
+        pa.field("closing", pa.float32()),
+        # where `luck` came from: the shot model (`SHOTS`, and what a row
+        # from before this column is), or the box score (`BOX`)
+        pa.field("source", pa.string()),
     ]
 )
 
 # The kinds of shot whose luck is counted: threes and free throws.
 LUCKY = (3, 1)
+
+SHOTS = "shots"
+BOX = "box"
+
+# A box score's threes and free throws: the columns of `box_scores.BoxLine.
+# stats`, the points each is worth, about the league's make rate, and how
+# many attempts of that are mixed into a season's own.
+_BOX_KINDS = (("tpm", "tpa", 3, 0.34, 2000.0), ("ftm", "fta", 1, 0.70, 2000.0))
 
 
 def game_luck(rows: Rows, fitted: Targets, games: Iterable[str]) -> dict[str, float]:
@@ -107,6 +125,7 @@ def luck_rows(
     luck: Mapping[str, float],
     contexts: Mapping[str, GameContext],
     day: Mapping[str, date],
+    source: str = SHOTS,
 ) -> list[dict]:
     """The file's rows for `luck`'s games; a game without a context has no
     teams to file it under, and is left out."""
@@ -122,9 +141,119 @@ def luck_rows(
             "away": contexts[game_id].away.name,
             "luck": value,
             "as_of": as_of,
+            "source": source,
         }
         for game_id, value in sorted(luck.items())
         if game_id in contexts
+    ]
+
+
+def box_luck(
+    lines: Iterable[BoxLine], contexts: Mapping[str, GameContext]
+) -> dict[str, float]:
+    """Each game's luck as its box score has it, for a game the shot model
+    never saw -- one with no plays, as every game before 2013-14 is: each
+    side's points on threes and free throws less the make rates of `lines`'
+    own games times its attempts, the home side's less the away's.
+
+    The best estimate without the shots: it knows how many went in and not
+    who took them or from where. A game is left out without a context, or
+    unless both of its teams have a line."""
+    totals: dict[tuple[str, str], dict[str, float]] = defaultdict(
+        lambda: defaultdict(float)
+    )
+    for line in lines:
+        team = totals[line.game_id, line.team_id]
+        for made, attempted, *_ in _BOX_KINDS:
+            team[made] += line.stats.get(made, 0.0)
+            team[attempted] += line.stats.get(attempted, 0.0)
+    rates = {
+        made: (sum(t[made] for t in totals.values()) + prior * weight)
+        / (sum(t[attempted] for t in totals.values()) + weight)
+        for made, attempted, _, prior, weight in _BOX_KINDS
+    }
+
+    def beyond(team: Mapping[str, float]) -> float:
+        return sum(
+            points * (team[made] - rates[made] * team[attempted])
+            for made, attempted, points, *_ in _BOX_KINDS
+        )
+
+    found = {}
+    for game_id, context in contexts.items():
+        home = totals.get((game_id, context.home.team_id))
+        away = totals.get((game_id, context.away.team_id))
+        if home is not None and away is not None:
+            found[game_id] = beyond(home) - beyond(away)
+    return found
+
+
+def with_flow(
+    rows: list[dict], values: Mapping[str, Mapping[str, float]], replace: bool = False
+) -> list[dict]:
+    """`rows` with `values`' columns (`flow.flow_values`: by column, then
+    game) filled in where a game has one. A reading already filed stays as
+    first known, like the luck beside it, unless `replace`."""
+    filled = []
+    for row in rows:
+        row = dict(row)
+        for column, by_game in values.items():
+            if row["game_id"] in by_game and (replace or row.get(column) is None):
+                row[column] = by_game[row["game_id"]]
+        filled.append(row)
+    return filled
+
+
+def with_season(
+    known: list[dict],
+    league: str,
+    season: int,
+    flows: Mapping[str, GameFlow],
+    lines: Iterable[BoxLine],
+    contexts: Mapping[str, GameContext],
+    day: Mapping[str, date],
+    as_of: date | None = None,
+    replace: bool = False,
+) -> list[dict]:
+    """The file's rows with what a season's plays and box scores add to the
+    shot model's luck: `flow`'s readings on every game that has them, and a
+    row of box-score luck (`box_luck`) for each game the file has none for.
+
+    Every game given is as known at one cut, so each column is centered
+    (`centered`) on its own home sides' average over them. A box-score row
+    is filed as of `as_of`, or the day after its game without one. `replace`
+    rebuilds the season: its box-score rows and flow readings are dropped
+    first, the shot model's luck kept.
+    """
+
+    def mine(row: dict) -> bool:
+        return row["league"] == league and row["season"] == season
+
+    if replace:
+        known = [r for r in known if not (mine(r) and r.get("source") == BOX)]
+    have = {r["game_id"] for r in known if r["league"] == league}
+    boxed = box_luck(lines, contexts)
+    new = sorted(g for g in boxed if g not in have and g in day)
+    added = [
+        row
+        for game_id, value in centered(boxed, new, contexts).items()
+        for row in luck_rows(
+            league,
+            season,
+            as_of or day[game_id] + timedelta(days=1),
+            {game_id: value},
+            contexts,
+            day,
+            source=BOX,
+        )
+    ]
+    values = {
+        column: centered(by_game, by_game, contexts)
+        for column, by_game in flow_values(flows, league).items()
+    }
+    return [
+        with_flow([row], values, replace)[0] if mine(row) else row
+        for row in merged_luck(known, added)
     ]
 
 

@@ -40,7 +40,13 @@ from ten_minute_version.availability import (
     expected_net,
     healthy_shares,
 )
-from ten_minute_version.box_scores import read_box_lines, season_minutes
+from ten_minute_version.box_scores import (
+    BoxLine,
+    game_date,
+    parse_box_lines,
+    read_box_lines,
+    season_minutes,
+)
 from ten_minute_version.carryover import (
     GameTerms,
     Result,
@@ -58,7 +64,14 @@ from ten_minute_version.chain import (
     chained_table,
 )
 from ten_minute_version.chain import development as chain_development
-from ten_minute_version.context import GameContext, context_table, read_context
+from ten_minute_version.context import (
+    GameContext,
+    context_table,
+    final_score,
+    parse_context,
+    read_context,
+    read_summaries,
+)
 from ten_minute_version.divisions import GENERICS, division_generics, is_generic
 from ten_minute_version.estimate import Rules, nearest_action_floors, season_context
 from ten_minute_version.estimated import estimated_tables
@@ -71,15 +84,18 @@ from ten_minute_version.evaluate import (
     fit_on_floor,
     known_games,
 )
+from ten_minute_version.flow import GameFlow, game_flow
 from ten_minute_version.lineups import SIDES
 from ten_minute_version.live import LiveKit, merged, prior_design
 from ten_minute_version.live import as_of as live_as_of
 from ten_minute_version.luck import (
+    BOX,
     centered,
     game_luck,
     luck_rows,
     merged_luck,
     read_luck,
+    with_season,
     write_luck,
 )
 from ten_minute_version.newcomers import (
@@ -2307,6 +2323,12 @@ def live(
                     ),
                 ),
             )
+            write_luck(
+                luck_path,
+                _with_season_flow(
+                    read_luck(luck_path), league, season, root, summaries, cut
+                ),
+            )
             b = solve(design, y, rows.possessions * train, pen, prior=mean)
             fitted = design, b, factor(design, rows.possessions * train, pen)
             floor = Floor.build(rows)
@@ -2617,6 +2639,94 @@ def luck(
     print(f"wrote {path}: {len(found)} games")
 
 
+def _with_season_flow(
+    known: list[dict],
+    league: str,
+    season: int,
+    root: str,
+    summaries: str,
+    cut: date | None = None,
+) -> list[dict]:
+    """The luck file's rows with a season's flow readings and box-score luck
+    added (`luck.with_season`), from its plays under `root` and its
+    `summaries`: the games before `cut`, filed as of it and what's there
+    kept; or with no cut the whole season, rebuilt."""
+    contexts: dict[str, GameContext] = {}
+    lines: list[BoxLine] = []
+    day: dict[str, date] = {}
+    finals: dict[str, tuple[int, int]] = {}
+    for game_id, summary in read_summaries(summaries, league, season):
+        found = parse_context(game_id, summary)
+        played = game_date(summary)
+        if found is None or played is None:
+            continue
+        contexts[game_id] = found
+        day[game_id] = played
+        lines += parse_box_lines(game_id, summary)
+        final = final_score(summary)
+        if final is not None:
+            finals[game_id] = final
+    flows: dict[str, GameFlow] = {}
+    for game in read_games(root, league, season):
+        # The plays' day is the one the game is filed under everywhere else;
+        # a summary's is UTC, a day on for a late tip.
+        day[game.game_id] = game.date
+        flowed = game_flow(game)
+        # Only a path that ends on the game's real score is one to read.
+        if flowed is not None and flowed.points == finals.get(game.game_id):
+            flows[game.game_id] = flowed
+    if cut is not None:
+        before = {g for g, d in day.items() if d < cut}
+        contexts = {g: c for g, c in contexts.items() if g in before}
+        lines = [line for line in lines if line.game_id in before]
+        flows = {g: f for g, f in flows.items() if g in before}
+    return with_season(
+        known,
+        league,
+        season,
+        flows,
+        lines,
+        contexts,
+        day,
+        as_of=cut,
+        replace=cut is None,
+    )
+
+
+def flow(
+    league: str,
+    first: int = 2010,
+    last: int = 2025,
+    root: str = "./plays",
+    summaries: str = "./summaries",
+    out: str = "./team-ratings",
+):
+    """
+    Every game's flow readings in `first`-`last` (`ten_minute_version.flow`)
+    into `{out}/{league}_luck.csv`, beside the shooting luck already there,
+    and a row of box-score luck for each game the file has none for
+    (`luck.box_luck`): every game before the plays begin in 2013-14, and the
+    ones since that the shot model never saw. Reads only the plays and the
+    summaries, so it needs no stint tables; run it after `luck`, which
+    writes a season's rows without them.
+    """
+    path = Path(out) / f"{league}_luck.csv"
+    rows = read_luck(path)
+    for season in range(first, last + 1):
+        before = len(rows)
+        rows = _with_season_flow(rows, league, season, root, summaries)
+        mine = [r for r in rows if r["league"] == league and r["season"] == season]
+        print(
+            f"{league} {season}: {len(mine)} games, "
+            f"{sum(r.get('jumpers') is not None for r in mine)} with flow, "
+            f"{sum(r.get('source') == BOX for r in mine)} from box scores "
+            f"({len(rows) - before:+d} rows)",
+            flush=True,
+        )
+    write_luck(path, rows)
+    print(f"wrote {path}: {len(rows)} games")
+
+
 def morning(
     league: str,
     season: int = 2026,
@@ -2723,6 +2833,7 @@ COMMANDS = {
     "chain": chain,
     "team_ratings": team_ratings,
     "luck": luck,
+    "flow": flow,
     "live_kit": live_kit,
     "live": live,
     "morning": morning,
