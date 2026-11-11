@@ -106,7 +106,7 @@ def season_minutes(
     totals: dict[tuple[str, str], list] = {}
     team_minutes: dict[str, float] = {}
     for game_id, summary in read_summaries(root, league, season):
-        day = _date(summary)
+        day = game_date(summary)
         if before is not None and (day is None or day >= before):
             continue
         for line in parse_box_lines(game_id, summary):
@@ -133,7 +133,7 @@ def season_minutes(
     return pa.Table.from_pylist(rows, schema=MINUTES_SCHEMA)
 
 
-def _date(summary: Mapping[str, Any]) -> date | None:
+def game_date(summary: Mapping[str, Any]) -> date | None:
     competitions = (summary.get("header") or {}).get("competitions") or [{}]
     text = competitions[0].get("date") or ""
     try:

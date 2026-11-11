@@ -116,6 +116,20 @@ def parse_context(game_id: str, summary: Mapping[str, Any]) -> GameContext | Non
     )
 
 
+def final_score(summary: Mapping[str, Any]) -> tuple[int, int] | None:
+    """A summary's final score, (home, away); None if its header has no
+    number for either side."""
+    competitions = (summary.get("header") or {}).get("competitions") or [{}]
+    scores = {
+        competitor.get("homeAway"): competitor.get("score")
+        for competitor in competitions[0].get("competitors", [])
+    }
+    try:
+        return int(scores["home"]), int(scores["away"])
+    except KeyError, TypeError, ValueError:
+        return None
+
+
 def context_table(contexts: Mapping[str, GameContext]) -> pa.Table:
     rows = []
     for context in contexts.values():

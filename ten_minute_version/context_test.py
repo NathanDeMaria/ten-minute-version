@@ -1,7 +1,7 @@
 import gzip
 import json
 
-from .context import parse_context, read_context
+from .context import final_score, parse_context, read_context
 
 
 def _summary(neutral: bool = False, away_groups: dict | None = None) -> dict:
@@ -92,3 +92,23 @@ def test_a_season_is_read_from_its_directory(tmp_path):
         json.dump(_summary(), file)
     assert list(read_context(tmp_path, "mens", 2025)) == ["401"]
     assert read_context(tmp_path, "womens", 2025) == {}
+
+
+def test_a_final_score_is_the_headers_home_and_away():
+    def summary(home, away):
+        return {
+            "header": {
+                "competitions": [
+                    {
+                        "competitors": [
+                            {"homeAway": "away", "score": away},
+                            {"homeAway": "home", "score": home},
+                        ]
+                    }
+                ]
+            }
+        }
+
+    assert final_score(summary("90", "76")) == (90, 76)
+    assert final_score(summary("90", None)) is None
+    assert final_score({}) is None
