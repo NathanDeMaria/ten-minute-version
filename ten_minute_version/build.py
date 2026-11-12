@@ -72,6 +72,8 @@ from ten_minute_version.context import (
     read_context,
     read_summaries,
 )
+from ten_minute_version.crowds import home_game, read_crowds, write_crowds
+from ten_minute_version.crowds import with_season as crowds_with_season
 from ten_minute_version.divisions import GENERICS, division_generics, is_generic
 from ten_minute_version.estimate import Rules, nearest_action_floors, season_context
 from ten_minute_version.estimated import estimated_tables
@@ -2449,6 +2451,11 @@ def live(
         f"{league} {cut}: {len(new)} teams, {len(teams) - len(unplayed)} played;"
         f" wrote {path}"
     )
+    crowd_path = Path(out) / f"{league}_crowds.csv"
+    write_crowds(
+        crowd_path,
+        _with_season_crowds(read_crowds(crowd_path), league, season, summaries, cut),
+    )
     # After the file predictions read is safe: a page's table is worth a
     # morning's log line, not its ratings.
     try:
@@ -2727,6 +2734,51 @@ def flow(
     print(f"wrote {path}: {len(rows)} games")
 
 
+def _with_season_crowds(
+    known: list[dict],
+    league: str,
+    season: int,
+    summaries: str,
+    cut: date | None = None,
+) -> list[dict]:
+    """The crowds file's rows with a season's rebuilt from its `summaries`
+    (`crowds.with_season`): the home games before `cut`, given one."""
+    games = [
+        game
+        for game_id, summary in read_summaries(summaries, league, season)
+        if (game := home_game(game_id, summary)) is not None
+    ]
+    return crowds_with_season(known, league, season, games, cut)
+
+
+def crowds(
+    league: str,
+    first: int = 2010,
+    last: int = 2025,
+    summaries: str = "./summaries",
+    out: str = "./team-ratings",
+):
+    """
+    Every team's home crowd reading through `first`-`last`
+    (`ten_minute_version.crowds`) into `{out}/{league}_crowds.csv`, replacing
+    those seasons' rows. In season order, each on the readings the one before
+    left, so a backfill starts at the first season there are summaries for.
+    """
+    path = Path(out) / f"{league}_crowds.csv"
+    rows = read_crowds(path)
+    for season in range(first, last + 1):
+        rows = _with_season_crowds(rows, league, season, summaries)
+        mine = [r for r in rows if r["league"] == league and r["season"] == season]
+        print(
+            f"{league} {season}: {len(mine)} rows, "
+            f"{len({r['team_id'] for r in mine if r['crowd'] is not None})} teams"
+            " with a reading",
+            flush=True,
+        )
+    write_crowds(path, rows)
+    print(f"wrote {path}: {len(rows)} rows")
+
+
 def morning(
     league: str,
     season: int = 2026,
@@ -2834,6 +2886,7 @@ COMMANDS = {
     "team_ratings": team_ratings,
     "luck": luck,
     "flow": flow,
+    "crowds": crowds,
     "live_kit": live_kit,
     "live": live,
     "morning": morning,
