@@ -8,12 +8,31 @@ are a pilot for the 2026 tournaments alone -- so the box scores are what
 there is. Two things in them say a player may not play:
 
 - **he missed the last game(s).** The chance he misses the next one rises
-  with the streak: about 55% after one, 70% after two, 95% after eight;
+  with the streak: about half after one, two thirds after two, 95% after
+  eight;
 - **his last game was far below his usual minutes**, which is how an injury
-  in the game looks: under a quarter of his usual share, 30-35% miss the
-  next one, against 6% of everyone else.
+  in the game looks: a regular held under a quarter of his usual share
+  misses the next one about 40% of the time, against under 2% after a full
+  game. Less so after a blowout (`BLOWOUT`), where some of the drop is a
+  starter rested for the second half: a regular at a quarter to half of his
+  usual misses 12% after one, 15% after a closer game, and at half to three
+  quarters 3% against 4.6%.
 
-Each league's rates over 2014-2025 are `OUT_CHANCE`.
+Both depend on who he is (`role`, from his recent share). A walk-on who
+"misses" a close game was never going to play in it -- a deep reserve plays
+a quarter of close games and 85% of 30-point ones -- so not playing says
+little about him, and a lot about a starter. One rate per situation for
+everyone, as this module had before, pooled the two: 6% out after a full
+game was 1.6% for rotation players and 54% for the deep bench, which put
+every regular's chance of missing at about four times its rate. The
+expected net weighs each player by his minutes, so the error sat on the
+players it counts most.
+
+`OUT_CHANCE` is each league's rates over 2022-2025's box scores by situation
+and role (`cell`), each situation with its pooled rate (`"any"`) for a cell
+too thin to have its own. Held out by season over 2022-2025, against the
+pooled table: log loss on rotation players 0.137 -> 0.106 mens, 0.129 ->
+0.097 womens; on all players 0.338 -> 0.285, 0.317 -> 0.271.
 
 A team's row then carries, beside `net`, its **expected** net
 (`expected_net`): the team healthy -- each player at his recent share, each
@@ -67,38 +86,54 @@ SUB_PRIOR = 1000.0
 BLOWOUT = 20.0
 BLOWOUT_WEIGHT = 0.3
 
+# A player's role by his recent share (`recent_share`, of the floor, five to a
+# team): below each bound the name beside it, at or above the last a
+# rotation player. 0.5 is about 20 minutes a game, 0.1 about four.
+ROLES = ((0.1, "deep bench"), (0.3, "bench"), (0.5, "fringe"))
+ROTATION = "rotation"
+
 # The chance a player misses a team's next game, by what its games so far
-# say of him (`cell`): each league's rate over 2014-2025.
-OUT_CHANCE: Mapping[str, Mapping[str, float]] = {
+# say of him and his role (`cell`). Fit on 2022-2025's box scores, minutes
+# standing in for floor shares, each cell shrunk toward its situation's
+# pooled rate by 50 player-games; a cell with fewer than 30 has only the
+# pooled rate, `"any"`. "first game" and "not yet played" are 2014-2025's
+# rates of the pooled table before roles: nobody has a role before he plays.
+OUT_CHANCE: Mapping[str, Mapping[str, Mapping[str, float]]] = {
     "mens": {
-        "first game": 0.577,
-        "not yet played": 0.791,
-        "missed 1": 0.569,
-        "missed 2": 0.711,
-        "missed 3": 0.783,
-        "missed 4-7": 0.855,
-        "missed 8+": 0.946,
-        "played, no usual": 0.181,
-        "played, last at <25": 0.349,
-        "played, last at 25-50": 0.257,
-        "played, last at 50-75": 0.147,
-        "played, last at >=75": 0.061,
+        "first game": {"any": 0.577},
+        "not yet played": {"any": 0.791},
+        "missed 1": {"any": 0.598, "deep bench": 0.668, "bench": 0.471, "fringe": 0.525, "rotation": 0.477},
+        "missed 2": {"any": 0.704, "deep bench": 0.724, "bench": 0.639, "fringe": 0.680, "rotation": 0.616},
+        "missed 3": {"any": 0.764, "deep bench": 0.767, "bench": 0.761, "fringe": 0.735, "rotation": 0.732},
+        "missed 4-7": {"any": 0.837, "deep bench": 0.834, "bench": 0.857, "fringe": 0.822},
+        "missed 8+": {"any": 0.941, "deep bench": 0.941, "bench": 0.918},
+        "played, no usual": {"any": 0.180, "deep bench": 0.523, "bench": 0.212, "fringe": 0.071, "rotation": 0.031},
+        "played, last at <25": {"any": 0.332, "deep bench": 0.525, "bench": 0.239, "fringe": 0.171, "rotation": 0.410},
+        "played, last at <25 after a blowout": {"any": 0.544, "deep bench": 0.697, "bench": 0.420, "fringe": 0.250, "rotation": 0.347},
+        "played, last at 25-50": {"any": 0.225, "deep bench": 0.509, "bench": 0.175, "fringe": 0.082, "rotation": 0.154},
+        "played, last at 25-50 after a blowout": {"any": 0.422, "deep bench": 0.677, "bench": 0.297, "fringe": 0.139, "rotation": 0.122},
+        "played, last at 50-75": {"any": 0.107, "deep bench": 0.485, "bench": 0.119, "fringe": 0.042, "rotation": 0.046},
+        "played, last at 50-75 after a blowout": {"any": 0.209, "deep bench": 0.684, "bench": 0.232, "fringe": 0.076, "rotation": 0.031},
+        "played, last at >=75": {"any": 0.054, "deep bench": 0.542, "bench": 0.096, "fringe": 0.025, "rotation": 0.016},
     },
     "womens": {
-        "first game": 0.409,
-        "not yet played": 0.741,
-        "missed 1": 0.532,
-        "missed 2": 0.663,
-        "missed 3": 0.743,
-        "missed 4-7": 0.834,
-        "missed 8+": 0.948,
-        "played, no usual": 0.146,
-        "played, last at <25": 0.302,
-        "played, last at 25-50": 0.243,
-        "played, last at 50-75": 0.141,
-        "played, last at >=75": 0.061,
+        "first game": {"any": 0.409},
+        "not yet played": {"any": 0.741},
+        "missed 1": {"any": 0.530, "deep bench": 0.578, "bench": 0.413, "fringe": 0.548, "rotation": 0.518},
+        "missed 2": {"any": 0.650, "deep bench": 0.651, "bench": 0.635, "fringe": 0.671, "rotation": 0.632},
+        "missed 3": {"any": 0.726, "deep bench": 0.711, "bench": 0.763, "fringe": 0.785, "rotation": 0.751},
+        "missed 4-7": {"any": 0.826, "deep bench": 0.815, "bench": 0.872, "fringe": 0.814},
+        "missed 8+": {"any": 0.953, "deep bench": 0.953, "bench": 0.934},
+        "played, no usual": {"any": 0.133, "deep bench": 0.413, "bench": 0.189, "fringe": 0.059, "rotation": 0.028},
+        "played, last at <25": {"any": 0.283, "deep bench": 0.466, "bench": 0.197, "fringe": 0.127, "rotation": 0.371},
+        "played, last at <25 after a blowout": {"any": 0.437, "deep bench": 0.585, "bench": 0.332, "fringe": 0.227, "rotation": 0.351},
+        "played, last at 25-50": {"any": 0.189, "deep bench": 0.445, "bench": 0.148, "fringe": 0.064, "rotation": 0.106},
+        "played, last at 25-50 after a blowout": {"any": 0.330, "deep bench": 0.577, "bench": 0.271, "fringe": 0.106, "rotation": 0.100},
+        "played, last at 50-75": {"any": 0.091, "deep bench": 0.419, "bench": 0.104, "fringe": 0.033, "rotation": 0.036},
+        "played, last at 50-75 after a blowout": {"any": 0.157, "deep bench": 0.584, "bench": 0.196, "fringe": 0.048, "rotation": 0.030},
+        "played, last at >=75": {"any": 0.049, "deep bench": 0.447, "bench": 0.099, "fringe": 0.023, "rotation": 0.015},
     },
-}
+}  # fmt: skip
 
 
 def game_shares(floor: Floor) -> dict[tuple[str, str], dict[str, float]]:
@@ -255,11 +290,17 @@ class SeasonGames:
         )
 
 
-def cell(player: str, games: Sequence[Shares]) -> str:
-    """What a team's games so far say of `player` -- the key to `OUT_CHANCE`."""
-    if not games:
+# A team that hasn't played.
+NO_GAMES = TeamGames([], [], [], np.zeros((0, 0)), np.zeros((0, 0)))
+
+
+def situation(player: str, games: TeamGames) -> str:
+    """What a team's games so far say of `player`: his streak of misses, or
+    his last game's share against his usual -- read as rest rather than a
+    knock when the last game was a blowout."""
+    if not games.shares:
         return "first game"
-    past = [g.get(player, 0.0) for g in games]
+    past = [g.get(player, 0.0) for g in games.shares]
     played = [x for x in past if x > 0]
     if not played:
         return "not yet played"
@@ -271,8 +312,34 @@ def cell(player: str, games: Sequence[Shares]) -> str:
     ratio = played[-1] / float(np.mean(played[:-1]))
     for top, name in ((0.25, "<25"), (0.5, "25-50"), (0.75, "50-75")):
         if ratio < top:
-            return f"played, last at {name}"
+            blowout = " after a blowout" if games.blowout[-1] else ""
+            return f"played, last at {name}{blowout}"
     return "played, last at >=75"
+
+
+def role(player: str, games: TeamGames) -> str | None:
+    """`player`'s part in the team by his recent share (`ROLES`); None before
+    the team has played."""
+    share = recent_share(player, games)
+    if share is None:
+        return None
+    for top, name in ROLES:
+        if share < top:
+            return name
+    return ROTATION
+
+
+def cell(player: str, games: TeamGames) -> tuple[str, str | None]:
+    """The key to `OUT_CHANCE`: `player`'s situation and role."""
+    return situation(player, games), role(player, games)
+
+
+def out_chance(league: str, player: str, games: TeamGames) -> float:
+    """The chance `player` misses the team's next game (`OUT_CHANCE`): his
+    cell's rate, or his situation's pooled one where the cell has none."""
+    where, part = cell(player, games)
+    rates = OUT_CHANCE[league][where]
+    return rates.get(part or "any", rates["any"])
 
 
 def recent_share(player: str, games: TeamGames) -> float | None:
@@ -304,9 +371,8 @@ def healthy_shares(expected: Shares, games: TeamGames) -> Shares:
 def chances_in(
     league: str, players: Sequence[str], games: TeamGames
 ) -> dict[str, float]:
-    """Each player's chance of playing the team's next game (`OUT_CHANCE`)."""
-    out = OUT_CHANCE[league]
-    return {p: 1 - out[cell(p, games.shares)] for p in players}
+    """Each player's chance of playing the team's next game (`out_chance`)."""
+    return {p: 1 - out_chance(league, p, games) for p in players}
 
 
 def capped(shares: np.ndarray, total: float, cap: float = CAP) -> np.ndarray:
@@ -367,8 +433,8 @@ def expected_net(
     `CAP`. Its net is each one's share times his `values` (offense plus
     defense; 0 for a player without one).
 
-    Every player has some chance of missing -- 6% even after a full game --
-    so every scenario can't be counted. The ones whose chance of missing is
+    Every player has some chance of missing -- a regular's 1.5% even after
+    a full game -- so every scenario can't be counted. The ones whose chance of missing is
     at least `RISKY` (the `MAX_EXACT` likeliest) are enumerated exactly; the
     rest are taken to first order, each one's absence on its own, on top of
     each scenario of the risky ones: two of them missing together is a

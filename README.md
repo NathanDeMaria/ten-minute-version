@@ -479,4 +479,7 @@ morning's team ratings: none of them change, as a played team's shares are who's
 
 A morning's rows also carry `play_chance`, his chance of playing the team's next game
 (`availability`). ESPN's roster injury field was empty for every player on 2026-11-06, so
-this is an estimate from missed games and last-game minutes, not a report.
+this is an estimate from missed games, last-game minutes and his role, not a report.
+`role` (rotation, fringe, bench, deep bench, by his recent share) says how to read it: a
+deep reserve's chance is mostly whether the game turns into a blowout, not whether he's
+fit.

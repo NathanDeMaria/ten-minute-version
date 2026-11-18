@@ -7,6 +7,7 @@ from .availability import (
     BLOWOUT_WEIGHT,
     CAP,
     OUT_CHANCE,
+    ROTATION,
     SeasonGames,
     TeamGames,
     capped,
@@ -16,7 +17,10 @@ from .availability import (
     game_shares,
     healthy_shares,
     lineup,
+    out_chance,
     recent_share,
+    role,
+    situation,
 )
 from .team_ratings import Floor, Shares
 from .team_ratings_test import _rows
@@ -55,19 +59,67 @@ def test_who_plays_when_he_sits_is_his_substitute():
     assert evidence[1] == pytest.approx(8.0)  # 4 possessions a side
 
 
-def test_the_cell_reads_the_streak_and_the_last_games_drop():
+def test_the_situation_reads_the_streak_and_the_last_games_drop():
     played = {"p": 1.0}
     missed: dict[str, float] = {}
     hurt = {"p": 0.2}
-    assert cell("p", []) == "first game"
-    assert cell("p", [missed]) == "not yet played"
-    assert cell("p", [played]) == "played, no usual"
-    assert cell("p", [played, played]) == "played, last at >=75"
-    assert cell("p", [played, hurt]) == "played, last at <25"
-    assert cell("p", [played, missed]) == "missed 1"
-    assert cell("p", [played, *[missed] * 5]) == "missed 4-7"
-    assert cell("p", [played, *[missed] * 9]) == "missed 8+"
+    assert situation("p", _games([])) == "first game"
+    assert situation("p", _games([missed])) == "not yet played"
+    assert situation("p", _games([played])) == "played, no usual"
+    assert situation("p", _games([played, played])) == "played, last at >=75"
+    assert situation("p", _games([played, hurt])) == "played, last at <25"
+    assert situation("p", _games([played, missed])) == "missed 1"
+    assert situation("p", _games([played, *[missed] * 5])) == "missed 4-7"
+    assert situation("p", _games([played, *[missed] * 9])) == "missed 8+"
+
+
+def test_short_minutes_in_a_blowout_read_as_rest():
+    hurt = {"p": 0.2}
+    games = _games([{"p": 1.0}, hurt], [False, True])
+    assert situation("p", games) == "played, last at <25 after a blowout"
+    # a full game in a blowout is still a full game
+    games = _games([{"p": 1.0}, {"p": 1.0}], [False, True])
+    assert situation("p", games) == "played, last at >=75"
+
+
+def test_the_role_is_the_recent_share():
+    assert role("p", _games([])) is None
+    assert role("p", _games([{"p": 0.05}] * 3)) == "deep bench"
+    assert role("p", _games([{"p": 0.2}] * 3)) == "bench"
+    assert role("p", _games([{"p": 0.4}] * 3)) == "fringe"
+    assert role("p", _games([{"p": 0.8}] * 3)) == ROTATION
+    assert role("q", _games([{"p": 0.8}] * 3)) == "deep bench"  # hasn't played
+
+
+def test_every_league_has_the_same_cells_and_a_pooled_rate_for_each():
     assert set(OUT_CHANCE["mens"]) == set(OUT_CHANCE["womens"])
+    for league in OUT_CHANCE.values():
+        for rates in league.values():
+            assert "any" in rates
+            assert all(0 < r < 1 for r in rates.values())
+
+
+def test_after_a_full_game_a_regular_is_far_likelier_to_play_than_a_walk_on():
+    regular = out_chance("mens", "p", _games([{"p": 0.8}] * 3))
+    walk_on = out_chance("mens", "p", _games([{"p": 0.05}] * 3))
+    rates = OUT_CHANCE["mens"]["played, last at >=75"]
+    assert regular == rates[ROTATION]
+    assert walk_on == rates["deep bench"]
+    assert regular < rates["any"] < walk_on
+    assert cell("p", _games([{"p": 0.8}] * 3)) == ("played, last at >=75", ROTATION)
+
+
+def test_a_thin_cell_takes_its_situations_pooled_rate():
+    # a starter out four straight still reads as rotation, and too few
+    # rotation players miss four to have their own rate
+    games = _games([{"p": 1.2}] * 30 + [{}] * 4)
+    assert situation("p", games) == "missed 4-7"
+    assert role("p", games) == ROTATION
+    assert ROTATION not in OUT_CHANCE["mens"]["missed 4-7"]
+    assert out_chance("mens", "p", games) == OUT_CHANCE["mens"]["missed 4-7"]["any"]
+    assert (
+        out_chance("mens", "p", _games([])) == OUT_CHANCE["mens"]["first game"]["any"]
+    )
 
 
 def test_recent_games_count_most_and_blowouts_least():
@@ -92,9 +144,10 @@ def test_healthy_shares_follow_the_recent_rotation():
 def test_chances_come_from_the_cells():
     games = _games([FIVE, {p: 1.25 for p in ("s1", "s2", "s3", "s4")}])
     chances = chances_in("mens", ["s1", "s5"], games)
-    assert chances["s5"] == pytest.approx(1 - OUT_CHANCE["mens"]["missed 1"])
+    assert chances["s5"] == pytest.approx(1 - out_chance("mens", "s5", games))
+    assert chances["s5"] == pytest.approx(1 - OUT_CHANCE["mens"]["missed 1"]["fringe"])
     assert chances["s1"] == pytest.approx(
-        1 - OUT_CHANCE["mens"]["played, last at >=75"]
+        1 - OUT_CHANCE["mens"]["played, last at >=75"][ROTATION]
     )
 
 
