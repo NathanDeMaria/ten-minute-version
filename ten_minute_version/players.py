@@ -17,22 +17,28 @@ Ratings are reported as everywhere else, his column plus a fifth of his
 team's; `vs_team` is his column alone.
 
 `play_chance` is his chance of playing the team's next game
-(`availability.OUT_CHANCE`, from his missed games and his last game's minutes),
-the chance the team's `available` averages over. Nobody reports college
-injuries, so it's an estimate from the box scores, and only a morning's: a
-finished season has no next game.
+(`availability.out_chance`, from his missed games, his last game's minutes and
+his role), the chance the team's `available` averages over. Nobody reports
+college injuries, so it's an estimate from the box scores, and only a
+morning's: a finished season has no next game.
+
+`role` is his part in the team by his recent share (`availability.role`):
+rotation, fringe, bench or deep bench. It says how to read `play_chance`: a
+deep reserve's is mostly the chance the game becomes a blowout, which is when
+he plays, not whether he's fit.
 """
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 import pyarrow as pa
 import pyarrow.csv
 
-from .availability import OUT_CHANCE, SeasonGames, cell
+from .availability import NO_GAMES, SeasonGames, TeamGames, out_chance, role
 from .divisions import is_generic
 from .posterior import SIGMA
 from .ratings import Design
@@ -70,6 +76,8 @@ PLAYER_SCHEMA = pa.schema(
         pa.field("share", pa.float32()),
         # of playing the team's next game
         pa.field("play_chance", pa.float32()),
+        # rotation, fringe, bench or deep bench, by his recent share
+        pa.field("role", pa.string()),
     ]
 )
 
@@ -119,22 +127,31 @@ def prior_team_sides(
     return out
 
 
+class NextGame(NamedTuple):
+    """A player's outlook for his team's next game."""
+
+    chance: float  # of playing it
+    role: str | None  # `availability.role`; None before the team has played
+
+
 def play_chances(
     league: str,
     pairs: Iterable[tuple[str, str]],
     games: SeasonGames | None,
     as_of: date,
-) -> dict[tuple[str, str], float]:
+) -> dict[tuple[str, str], NextGame]:
     """Each (player, team)'s chance of playing the team's next game after
-    `as_of`, from its games before it; `games` is None before anyone's played."""
-    out = OUT_CHANCE[league]
-    found: dict[str, list] = {}
-    chances = {}
+    `as_of`, and his role, from its games before it; `games` is None before
+    anyone's played."""
+    found: dict[str, TeamGames] = {}
+    out = {}
     for player, team in pairs:
         if team not in found:
-            found[team] = games.before(team, as_of).shares if games else []
-        chances[(player, team)] = 1 - out[cell(player, found[team])]
-    return chances
+            found[team] = games.before(team, as_of) if games else NO_GAMES
+        out[(player, team)] = NextGame(
+            1 - out_chance(league, player, found[team]), role(player, found[team])
+        )
+    return out
 
 
 def played_rows(
@@ -142,7 +159,7 @@ def played_rows(
     minutes: Iterable[Mapping],
     teams: Mapping[str, str | None],
     as_of: date | None = None,
-    chances: Mapping[tuple[str, str], float] | None = None,
+    chances: Mapping[tuple[str, str], NextGame] | None = None,
 ) -> list[dict]:
     """One row per rated player, from his `chain.CHAINED_SCHEMA` row and his
     `box_scores.MINUTES_SCHEMA` row for the same team."""
@@ -152,6 +169,7 @@ def played_rows(
         if r["team_id"] is None or is_generic(r["athlete_id"]):
             continue
         m = box.get((r["athlete_id"], r["team_id"]), {})
+        ahead = (chances or {}).get((r["athlete_id"], r["team_id"]))
         out.append(
             {
                 "league": r["league"],
@@ -173,7 +191,8 @@ def played_rows(
                 "starts": m.get("starts"),
                 "minutes": m.get("minutes"),
                 "share": m.get("share"),
-                "play_chance": (chances or {}).get((r["athlete_id"], r["team_id"])),
+                "play_chance": ahead.chance if ahead else None,
+                "role": ahead.role if ahead else None,
             }
         )
     return out
@@ -192,7 +211,7 @@ def waiting_rows(
     names: Mapping[str, str | None],
     teams: Mapping[str, str | None],
     sigma: float = SIGMA,
-    chances: Mapping[tuple[str, str], float] | None = None,
+    chances: Mapping[tuple[str, str], NextGame] | None = None,
 ) -> list[dict]:
     """One row per (player, team) in `roster`, at the priors of `design`, a
     design with no rows (`live.prior_design`) and his team at `sides`, by
@@ -205,6 +224,7 @@ def waiting_rows(
         own_o, own_d = float(mean[o]), float(mean[d])
         var_o, var_d = sigma**2 / penalty[o], sigma**2 / penalty[d]
         side = sides.get(team)
+        ahead = (chances or {}).get((player, team))
         offense, defense = own_o, own_d
         both = 0.0
         if side is not None:
@@ -234,7 +254,8 @@ def waiting_rows(
                 "starts": 0,
                 "minutes": 0.0,
                 "share": shares.get(team, {}).get(player, 0.0),
-                "play_chance": (chances or {}).get((player, team)),
+                "play_chance": ahead.chance if ahead else None,
+                "role": ahead.role if ahead else None,
             }
         )
     return out
