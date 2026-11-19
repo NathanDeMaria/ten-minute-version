@@ -23,7 +23,7 @@ import traceback
 import urllib.error
 import zlib
 from collections import Counter
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -702,6 +702,31 @@ def _rating_tables(league: str, tables: str) -> dict[int, list[dict]]:
     ):
         found[int(path.parent.name.split("=")[1])] = pq.read_table(path).to_pylist()
     return found
+
+
+def _needed(found: Mapping[int, object], seasons: Iterable[int], what: str, step: str):
+    """Refuse to go on without `what` for every one of `seasons`.
+
+    Every reader of these tables takes a missing season as an empty one: a
+    chain without `season_ratings` carries every returner with no
+    development and projects minutes without last season's ratings, and
+    says nothing. A backfill built that way on 2026-11-18 came out with its
+    preseason ratings pulled toward the middle -- Brier +43e-5 on womens in
+    Cassandra -- so a missing season is an error, naming the step to run."""
+    missing = sorted(set(seasons) - set(found))
+    if missing:
+        raise FileNotFoundError(
+            f"no {what} for seasons {missing}: run `build.py {step}` for them first"
+        )
+
+
+def development_before(
+    ratings: Mapping[int, list[dict]], season: int
+) -> dict[int, tuple[float, float]]:
+    """How much returners develop (`chain.development`), from the seasons
+    before `season` only: what was known going into it. Learned from every
+    season, as it was, a backfill's 2015 carried what 2025's players did."""
+    return chain_development({s: rows for s, rows in ratings.items() if s < season})
 
 
 def _recruit_model(
@@ -1745,7 +1770,8 @@ def _chain_fits(
     given, gets what the last season carries to the next: its "states" and
     "last_end". `weeks` -1 fits only each season's end.
     """
-    grown = chain_development(_rating_tables(league, tables))
+    ratings = _rating_tables(league, tables)
+    _needed(ratings, range(first, last), "season_ratings.parquet", "season_ratings")
     found = read_recruits(recruits, league)
     newcomer_prior_ = NewcomerPrior.load(league)
 
@@ -1761,6 +1787,7 @@ def _chain_fits(
         data = _load_chain_cache(cache, league, season)
         assert data is not None, f"no chain_weeks cache for {league} {season}"
         rows, design = data["rows"], data["design"]
+        grown = development_before(ratings, season)
 
         outside = _outside_teams(tables, league, season)
 
@@ -2000,8 +2027,23 @@ def team_ratings(
     and womens models read. Run `chain_weeks` with at least `weeks` weeks
     first, so the cuts reach the season's end. Each season's week-0 shares
     are projected by a minutes model learned on the seasons before it.
+
+    A team's projection, before its first game, is over everyone who played
+    for it that season: ESPN serves only current rosters, so that's the
+    nearest a past season has to the roster a morning reads. Counting only
+    those who'd played within three weeks of the opener -- leaving out a
+    transfer who arrived in December -- read further from a real roster,
+    not nearer: it drops everyone who starts a season hurt, whom a roster
+    lists. Womens Brier in Cassandra +56e-5 against everyone.
     """
     spells = _spells(league, tables)
+    _needed(spells, range(first, last + 1), "minutes.parquet", "minutes")
+    _needed(
+        _rating_tables(league, tables),
+        range(first, last),
+        "season_ratings.parquet",
+        "season_ratings",
+    )
     history = _histories(league, tables, spells, read_recruits(recruits, league))
     histories = {season: history(season) for season in spells}
     examples = _minutes_examples(spells, histories)
@@ -2194,6 +2236,7 @@ def live_kit(
     ):
         pass
     spells = _spells(league, tables)
+    _needed(spells, range(minutes_from, season), "minutes.parquet", "minutes")
     history = _histories(league, tables, spells, read_recruits(recruits, league))
     past = {s: history(s) for s in range(minutes_from, season) if s in spells}
     examples = _minutes_examples(spells, past)
@@ -2210,7 +2253,7 @@ def live_kit(
         season,
         final["states"],
         final["last_end"],
-        dict(chain_development(_rating_tables(league, tables))),
+        development_before(_rating_tables(league, tables), season),
         model,
         history(season),
         Floor.build(rows).pace(np.ones(len(rows), bool)),
