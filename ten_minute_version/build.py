@@ -17,6 +17,7 @@ score the estimated lineups on games whose real ones are known (see
 in `ten_minute_version/releases/`.
 """
 
+import dataclasses
 import json
 import pickle
 import traceback
@@ -153,11 +154,10 @@ from ten_minute_version.priors import (
 )
 from ten_minute_version.probabilities import FEATURES, OnFloorModel
 from ten_minute_version.process import (
+    ProcessFit,
     Rating,
-    fit_seasons,
+    Rolling,
     season_sides,
-    with_ahead,
-    write_fits,
 )
 from ten_minute_version.ratings import (
     TARGETS,
@@ -2222,12 +2222,15 @@ def live_kit(
     tables: str = "./stints",
     cache: str = CHAIN_WEEKS,
     out: str = LIVE_KIT,
+    ratings: str = "./team-ratings",
 ):
     """
     What carries into `season` (`ten_minute_version.live.LiveKit`), fitted
     once from every season before it: `{out}/{league}-{season}.pkl`, what
     `live` reads each morning. Needs the `chain_weeks` cache through the
-    season before, and `season_ratings` and `minutes` for every season.
+    season before, and `season_ratings` and `minutes` for every season; the
+    box-score process fit reads the `summaries` and the team ratings in
+    `ratings` (`{league}_player_ratings.csv`).
     """
     final: dict = {}
     for _ in _chain_fits(
@@ -2270,7 +2273,9 @@ def live_kit(
             for side in ("home", "away")
         },
         _division_one(last),
+        _process_fit(league, season, summaries, ratings),
     )
+    _print_fit(league, season, kit.process)
     path = _kit_path(out, league, season)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("wb") as file:
@@ -2378,7 +2383,13 @@ def live(
             write_luck(
                 luck_path,
                 _with_season_flow(
-                    read_luck(luck_path), league, season, root, summaries, cut
+                    read_luck(luck_path),
+                    league,
+                    season,
+                    root,
+                    summaries,
+                    cut,
+                    process=frozen.process,
                 ),
             )
             b = solve(design, y, rows.possessions * train, pen, prior=mean)
@@ -2696,6 +2707,33 @@ def luck(
     print(f"wrote {path}: {len(found)} games")
 
 
+@dataclass(frozen=True)
+class _SeasonBox:
+    """What a season's summaries say of its games: who played where, each
+    player's box line, the day, the final score."""
+
+    contexts: dict[str, GameContext]
+    lines: list[BoxLine]
+    day: dict[str, date]
+    finals: dict[str, tuple[int, int]]
+
+
+def _season_box(league: str, season: int, summaries: str) -> _SeasonBox:
+    box = _SeasonBox({}, [], {}, {})
+    for game_id, summary in read_summaries(summaries, league, season):
+        found = parse_context(game_id, summary)
+        played = game_date(summary)
+        if found is None or played is None:
+            continue
+        box.contexts[game_id] = found
+        box.day[game_id] = played
+        box.lines.extend(parse_box_lines(game_id, summary))
+        final = final_score(summary)
+        if final is not None:
+            box.finals[game_id] = final
+    return box
+
+
 def _with_season_flow(
     known: list[dict],
     league: str,
@@ -2703,26 +2741,17 @@ def _with_season_flow(
     root: str,
     summaries: str,
     cut: date | None = None,
+    process: ProcessFit | None = None,
+    box: _SeasonBox | None = None,
 ) -> list[dict]:
-    """The luck file's rows with a season's flow readings and box-score luck
-    added (`luck.with_season`), from its plays under `root` and its
-    `summaries`: the games before `cut`, filed as of it and what's there
-    kept; or with no cut the whole season, rebuilt."""
-    contexts: dict[str, GameContext] = {}
-    lines: list[BoxLine] = []
-    day: dict[str, date] = {}
-    finals: dict[str, tuple[int, int]] = {}
-    for game_id, summary in read_summaries(summaries, league, season):
-        found = parse_context(game_id, summary)
-        played = game_date(summary)
-        if found is None or played is None:
-            continue
-        contexts[game_id] = found
-        day[game_id] = played
-        lines += parse_box_lines(game_id, summary)
-        final = final_score(summary)
-        if final is not None:
-            finals[game_id] = final
+    """The luck file's rows with a season's flow readings, box-score luck and
+    box-score process readings (read with `process`) added
+    (`luck.with_season`), from its plays under `root` and its `summaries`
+    (or `box`, already read from them): the games before `cut`, filed as of
+    it and what's there kept; or with no cut the whole season, rebuilt."""
+    box = box or _season_box(league, season, summaries)
+    contexts, lines, finals = box.contexts, box.lines, box.finals
+    day = dict(box.day)
     flows: dict[str, GameFlow] = {}
     for game in read_games(root, league, season):
         # The plays' day is the one the game is filed under everywhere else;
@@ -2748,7 +2777,72 @@ def _with_season_flow(
         as_of=cut,
         replace=cut is None,
         finals=finals,
+        process=process,
     )
+
+
+def _process_ratings(league: str, ratings: str) -> dict[str, list[Rating]]:
+    """The team ratings' rows by team, in date order, from
+    `{ratings}/{league}_player_ratings.csv` (`team_ratings`): the expectation
+    the box-score process fit measures games against. Empty without the file."""
+    path = Path(ratings) / f"{league}_player_ratings.csv"
+    if not path.exists():
+        return {}
+    table = pyarrow.csv.read_csv(
+        path,
+        convert_options=pyarrow.csv.ConvertOptions(column_types=TEAM_RATING_SCHEMA),
+    )
+    found: dict[str, list[Rating]] = {}
+    for row in sorted(table.to_pylist(), key=lambda r: r["as_of"]):
+        found.setdefault(row["team_id"], []).append(
+            Rating(row["as_of"], row["net"], row["pace"], row["home_edge"])
+        )
+    return found
+
+
+def _first_rated(ratings: dict[str, list[Rating]]) -> int | None:
+    """The season the team ratings begin: the first one with sides to fit."""
+    days = [rows[0].as_of for rows in ratings.values() if rows]
+    return _season_of(min(days)) if days else None
+
+
+def _season_of(day: date) -> int:
+    """The season a day is in: one starting in the fall carries its year."""
+    return day.year if day.month >= 7 else day.year - 1
+
+
+def _process_sides(league: str, season: int, box: _SeasonBox, ratings):
+    return season_sides(season, box.lines, box.contexts, box.finals, box.day, ratings)
+
+
+def _print_fit(league: str, season: int, fit: ProcessFit | None) -> None:
+    if fit is None:
+        print(f"{league} {season}: no box-score process fit yet", flush=True)
+        return
+    print(
+        f"{league} {season}: process fit on {fit.rows} team-games; "
+        + " ".join(f"{s} {v:+.3f}" for s, v in fit.coef.items()),
+        flush=True,
+    )
+
+
+def _process_fit(
+    league: str, season: int, summaries: str, ratings: str
+) -> ProcessFit | None:
+    """`season`'s box-score process fit, on every season before it the team
+    ratings cover; None short of `process.MIN_ROWS` team-games."""
+    found = _process_ratings(league, ratings)
+    first = _first_rated(found)
+    if first is None:
+        return None
+    rolling = Rolling()
+    for earlier in range(first, season):
+        rolling.add(
+            _process_sides(
+                league, earlier, _season_box(league, earlier, summaries), found
+            )
+        )
+    return rolling.fit(season)
 
 
 def flow(
@@ -2767,17 +2861,40 @@ def flow(
     ones since that the shot model never saw. Reads only the plays and the
     summaries, so it needs no stint tables; run it after `luck`, which
     writes a season's rows without them.
+
+    Each season's box-score process readings too, with that season's
+    rolling fit (`process.Rolling`): on every season before it that the team
+    ratings beside the file (`{out}/{league}_player_ratings.csv`) cover,
+    read from the summaries here, those before `first` included.
     """
     path = Path(out) / f"{league}_luck.csv"
     rows = read_luck(path)
+    ratings = _process_ratings(league, out)
+    rated = _first_rated(ratings)
+    rolling = Rolling()
+    if rated is not None:
+        for earlier in range(rated, first):
+            rolling.add(
+                _process_sides(
+                    league, earlier, _season_box(league, earlier, summaries), ratings
+                )
+            )
     for season in range(first, last + 1):
         before = len(rows)
-        rows = _with_season_flow(rows, league, season, root, summaries)
+        box = _season_box(league, season, summaries)
+        fit = rolling.fit(season) if rated is not None else None
+        _print_fit(league, season, fit)
+        rows = _with_season_flow(
+            rows, league, season, root, summaries, process=fit, box=box
+        )
+        if rated is not None and season >= rated:
+            rolling.add(_process_sides(league, season, box, ratings))
         mine = [r for r in rows if r["league"] == league and r["season"] == season]
         print(
             f"{league} {season}: {len(mine)} games, "
             f"{sum(r.get('jumpers') is not None for r in mine)} with flow, "
-            f"{sum(r.get('source') == BOX for r in mine)} from box scores "
+            f"{sum(r.get('source') == BOX for r in mine)} from box scores, "
+            f"{sum(r.get('process') is not None for r in mine)} with a process reading "
             f"({len(rows) - before:+d} rows)",
             flush=True,
         )
@@ -2913,58 +3030,27 @@ def _chain_summary(errors: list[dict], baseline: list[dict]) -> None:
         )
 
 
-def process_fits(
+def kit_process(
     league: str,
-    first: int = 2014,
-    last: int = 2026,
+    season: int,
+    kit: str = LIVE_KIT,
     summaries: str = "./summaries",
-    out: str = "./team-ratings",
+    ratings: str = "./team-ratings",
 ):
     """
-    The box-score process fits (`ten_minute_version.process`) for each season
-    in `first`-`last`, each on every season before it, into `releases/`:
-    commit what this changes. Reads the summaries and the team ratings
-    (`{out}/{league}_player_ratings.csv`, `team_ratings`), whose
-    expectation the fit measures games against; a season before the ratings
-    begin adds nothing to fit on. Run it at each rollover, so the new season
-    is read with the one just finished in its fit.
+    Refit the box-score process fit in an existing kit
+    (`{kit}/{league}-{season}.pkl`) and write the kit back, everything else
+    as it was: for a kit built before kits carried one. `live_kit` fits it
+    with the rest, so a new season's kit needs nothing more.
     """
-    table = pyarrow.csv.read_csv(
-        Path(out) / f"{league}_player_ratings.csv",
-        convert_options=pyarrow.csv.ConvertOptions(column_types=TEAM_RATING_SCHEMA),
-    )
-    ratings: dict[str, list[Rating]] = {}
-    for row in sorted(table.to_pylist(), key=lambda r: r["as_of"]):
-        ratings.setdefault(row["team_id"], []).append(
-            Rating(row["as_of"], row["net"], row["pace"], row["home_edge"])
-        )
-    sides = []
-    for season in range(first, last):
-        contexts: dict[str, GameContext] = {}
-        lines: list[BoxLine] = []
-        day: dict[str, date] = {}
-        finals: dict[str, tuple[int, int]] = {}
-        for game_id, summary in read_summaries(summaries, league, season):
-            found, played, final = (
-                parse_context(game_id, summary),
-                game_date(summary),
-                final_score(summary),
-            )
-            if found is None or played is None or final is None:
-                continue
-            contexts[game_id], day[game_id], finals[game_id] = found, played, final
-            lines += parse_box_lines(game_id, summary)
-        found_sides = season_sides(season, lines, contexts, finals, day, ratings)
-        sides += found_sides
-        print(f"{league} {season}: {len(found_sides)} team-games", flush=True)
-    fits = fit_seasons(with_ahead(sides), range(first, last + 1))
-    for season, fit in sorted(fits.items()):
-        print(
-            f"  {season}: on {fit.rows} team-games; "
-            + " ".join(f"{s} {v:+.3f}" for s, v in fit.coef.items()),
-            flush=True,
-        )
-    print(f"wrote {write_fits(league, fits)}")
+    path = _kit_path(kit, league, season)
+    with path.open("rb") as file:
+        frozen: LiveKit = pickle.load(file)
+    fit = _process_fit(league, season, summaries, ratings)
+    _print_fit(league, season, fit)
+    with path.open("wb") as file:
+        pickle.dump(dataclasses.replace(frozen, process=fit), file, protocol=5)
+    print(f"wrote {path}")
 
 
 # Every command, by the name the CLI (`build.py` at the repo root) runs it as.
@@ -2991,7 +3077,7 @@ COMMANDS = {
     "team_ratings": team_ratings,
     "luck": luck,
     "flow": flow,
-    "process_fits": process_fits,
+    "kit_process": kit_process,
     "crowds": crowds,
     "live_kit": live_kit,
     "live": live,

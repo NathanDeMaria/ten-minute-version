@@ -49,3 +49,14 @@ def test_a_team_that_hasnt_played_is_its_roster_at_its_priors():
 def test_a_morning_is_today_unless_told():
     assert as_of("2026-11-03") == date(2026, 11, 3)
     assert as_of(None) == date.today()
+
+
+def test_a_kit_pickled_before_kits_carried_a_process_fit_reads_none():
+    import pickle
+
+    from .live import LiveKit
+
+    old = LiveKit.__new__(LiveKit)
+    # what unpickling an old kit leaves: every field but the new one
+    old.__dict__.update({"league": "mens", "season": 2026})
+    assert pickle.loads(pickle.dumps(old)).process is None

@@ -21,9 +21,10 @@ score says won't repeat. The model reading it takes a share of that off the
 margin, as it does luck.
 
 The fit rolls: a season is read with coefficients fitted on every season
-before it and none of its own (`fit_seasons`, shipped in `releases/` by
-`build.process_fits`), so a replay of an old season sees what was knowable
-then. The coefficients drift as the luck file's other readings fill in --
+before it and none of its own (`Rolling`), so a replay of an old season sees
+what was knowable then. Nothing is stored to go stale: `build.live_kit`
+fits the live season's into the season's kit, beside the other priors it
+freezes, and `build.flow` refits each season as it walks the history. The coefficients drift as the luck file's other readings fill in --
 the shooting discount was about nothing in 2014-17 and is larger since --
 and an expanding window follows that without a window length to choose
 (two, three and four seasons did no better). A season reads nothing until
@@ -42,12 +43,10 @@ season read with its own rolling fit, Brier against none per season:
     womens     -5.0e-5   -2.7e-5   +21.9e-5  2018-25, 7/8 at 0.05
 """
 
-import json
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
-from pathlib import Path
 
 import numpy as np
 
@@ -98,8 +97,6 @@ MIN_ROWS = 15_000
 # Games ahead a game's rates are scored against.
 AHEAD = 5
 
-_RELEASES = Path(__file__).parent / "releases"
-
 
 @dataclass(frozen=True)
 class ProcessFit:
@@ -115,42 +112,6 @@ class ProcessFit:
 
     def score(self, rates: Mapping[str, float]) -> float:
         return sum(self.coef[s] * rates[s] / self.sd[s] for s in STATS)
-
-
-def release_path(league: str) -> Path:
-    return _RELEASES / f"process-{league}.json"
-
-
-def load_fits(league: str) -> dict[int, ProcessFit]:
-    path = release_path(league)
-    if not path.exists():
-        return {}
-    return {
-        int(season): ProcessFit(int(season), fit["sd"], fit["coef"], fit["rows"])
-        for season, fit in json.loads(path.read_text()).items()
-    }
-
-
-def write_fits(league: str, fits: Mapping[int, ProcessFit]) -> Path:
-    path = release_path(league)
-    path.write_text(
-        json.dumps(
-            {
-                str(s): {"sd": f.sd, "coef": f.coef, "rows": f.rows}
-                for s, f in sorted(fits.items())
-            },
-            indent=1,
-        )
-        + "\n"
-    )
-    return path
-
-
-def fit_for(fits: Mapping[int, ProcessFit], season: int) -> ProcessFit | None:
-    """The season's own fit; for a season not fitted yet, the latest one
-    before it -- every season it was fitted on is still before this one."""
-    known = [s for s in fits if s <= season]
-    return fits[max(known)] if known else None
 
 
 def team_totals(lines: Iterable[BoxLine]) -> dict[tuple[str, str], dict[str, float]]:
@@ -354,14 +315,19 @@ def fit_process(season: int, rows: list[tuple[Side, float]]) -> ProcessFit:
     )
 
 
-def fit_seasons(
-    rows: list[tuple[Side, float]], seasons: Iterable[int]
-) -> dict[int, ProcessFit]:
-    """Each of `seasons`' fit on every season before it, where that's at
-    least `MIN_ROWS` team-games."""
-    fits = {}
-    for season in seasons:
-        before = [r for r in rows if r[0].season < season]
-        if len(before) >= MIN_ROWS:
-            fits[season] = fit_process(season, before)
-    return fits
+class Rolling:
+    """The expanding fit: the sides of every season added so far, and each
+    season's fit on all of them. Add seasons in order and fit a season
+    before adding it, and no season is read with its own games."""
+
+    def __init__(self) -> None:
+        self.sides: list[Side] = []
+
+    def add(self, sides: Iterable[Side]) -> None:
+        self.sides += sides
+
+    def fit(self, season: int) -> ProcessFit | None:
+        """`season`'s fit on the seasons added before it, if that's at least
+        `MIN_ROWS` team-games."""
+        rows = with_ahead([s for s in self.sides if s.season < season])
+        return fit_process(season, rows) if len(rows) >= MIN_ROWS else None

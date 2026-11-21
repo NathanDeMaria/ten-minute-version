@@ -49,7 +49,7 @@ import pyarrow.csv
 from .box_scores import BoxLine
 from .context import GameContext
 from .flow import GameFlow, flow_values
-from .process import ProcessFit, box_process, fit_for, load_fits
+from .process import ProcessFit, box_process
 from .ratings import Rows, Targets
 
 LUCK_SCHEMA = pa.schema(
@@ -219,7 +219,7 @@ def with_season(
     as_of: date | None = None,
     replace: bool = False,
     finals: Mapping[str, tuple[int, int]] | None = None,
-    fits: Mapping[int, ProcessFit] | None = None,
+    process: ProcessFit | None = None,
 ) -> list[dict]:
     """The file's rows with what a season's plays and box scores add to the
         shot model's luck: `flow`'s readings on every game that has them, the box
@@ -261,8 +261,7 @@ def with_season(
         column: centered(by_game, by_game, contexts)
         for column, by_game in flow_values(flows, league).items()
     }
-    fit = fit_for(load_fits(league) if fits is None else fits, season)
-    processed = box_process(lines, contexts, finals or {}, fit)
+    processed = box_process(lines, contexts, finals or {}, process)
     values["process"] = centered(processed, processed, contexts)
     return [
         with_flow([row], values, replace)[0] if mine(row) else row
