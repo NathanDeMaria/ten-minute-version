@@ -25,6 +25,7 @@ import numpy as np
 
 from .chain import PlayerState, SeasonEnd
 from .preseason import History, MinutesModel
+from .process import ProcessFit
 from .ratings import Design
 
 
@@ -50,6 +51,10 @@ class LiveKit:
     # the teams ESPN filed in Division I last season: whose rosters a
     # morning fetches until they've played
     division_one: list[str]
+    # the season's box-score process fit (`process.Rolling`), on every season
+    # before it; None short of enough games, or in a kit from before it
+    # carried one (unpickled, it reads the default)
+    process: ProcessFit | None = None
 
 
 def prior_design(players: Iterable[str], teams: Iterable[str]) -> Design:

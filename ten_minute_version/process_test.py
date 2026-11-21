@@ -11,15 +11,13 @@ from .process import (
     STATS,
     ProcessFit,
     Rating,
+    Rolling,
     Side,
     box_process,
     complete_games,
     expected_margin,
-    fit_for,
     fit_process,
-    fit_seasons,
     latest,
-    load_fits,
     side_stats,
     team_totals,
     with_ahead,
@@ -121,19 +119,6 @@ def test_nothing_is_read_without_a_fit():
     assert _read(HOT, BASE, fit=None) == {}
 
 
-def test_a_season_not_fitted_yet_is_read_with_the_latest_fit_before_it():
-    fits = {2020: FIT, 2023: FIT}
-    assert fit_for(fits, 2023) is FIT and fit_for(fits, 2026) is fits[2023]
-    assert fit_for(fits, 2019) is None
-
-
-def test_the_shipped_fits_cover_both_leagues_through_the_live_season():
-    for league in ("mens", "womens"):
-        fits = load_fits(league)
-        assert max(fits) >= 2026
-        assert all(f.rows >= MIN_ROWS for f in fits.values())
-
-
 def test_the_expected_margin_is_the_net_gap_at_the_pairs_pace_plus_the_home_edge():
     home, away = (
         Rating(date(2025, 11, 1), 10.0, 70.0, 3.0),
@@ -176,12 +161,22 @@ def test_a_side_is_scored_against_its_teams_next_games():
 
 
 def test_a_season_is_fitted_only_on_the_seasons_before_it():
-    rows = [(s, s.over) for s in _sides(MIN_ROWS, 2020)] + [
-        (s, -s.over) for s in _sides(10, 2021)
-    ]
-    fits = fit_seasons(rows, [2020, 2021, 2022])
-    assert set(fits) == {2021, 2022}  # 2020 has nothing before it
-    assert fits[2021].rows == MIN_ROWS and fits[2022].rows == MIN_ROWS + 10
+    rolling = Rolling()
+    rolling.add(_sides(MIN_ROWS + AHEAD, 2020))
+    assert rolling.fit(2020) is None  # nothing before it
+    first = rolling.fit(2021)
+    assert first is not None and first.rows == MIN_ROWS
+    rolling.add(_sides(10 + AHEAD, 2021))
+    # a season added doesn't reach back into its own fit
+    again, later = rolling.fit(2021), rolling.fit(2022)
+    assert again is not None and again.rows == MIN_ROWS
+    assert later is not None and later.rows == MIN_ROWS + 10
+
+
+def test_a_fit_needs_enough_games_under_it():
+    rolling = Rolling()
+    rolling.add(_sides(MIN_ROWS - 1 + AHEAD, 2020))
+    assert rolling.fit(2021) is None
 
 
 def test_the_fit_finds_a_rate_that_carries_over():
@@ -208,7 +203,7 @@ def test_a_season_files_the_reading_beside_the_luck():
     contexts = {"g1": GameContext("g1", True, False, _team("H"), _team("A"))}
     rows = with_season(
         [], "mens", 2025, {}, _game(HOT, BASE), contexts, {"g1": date(2025, 11, 4)},
-        finals=_finals(HOT, BASE), fits={2025: FIT},
+        finals=_finals(HOT, BASE), process=FIT,
     )  # fmt: skip
     # one game at a neutral site: filed as it is, not centered
     assert rows[0]["process"] == pytest.approx(_read(HOT, BASE)["g1"])
@@ -220,6 +215,11 @@ def test_a_season_files_the_reading_beside_the_luck():
         _game(HOT, BASE),
         contexts,
         {"g1": date(2025, 11, 4)},
-        fits={2025: FIT},
+        process=FIT,
     )
     assert without[0].get("process") is None  # no finals, no reading
+    unfitted = with_season(
+        [], "mens", 2025, {}, _game(HOT, BASE), contexts, {"g1": date(2025, 11, 4)},
+        finals=_finals(HOT, BASE),
+    )  # fmt: skip
+    assert unfitted[0].get("process") is None  # no fit, no reading
