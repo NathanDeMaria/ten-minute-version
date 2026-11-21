@@ -49,6 +49,7 @@ import pyarrow.csv
 from .box_scores import BoxLine
 from .context import GameContext
 from .flow import GameFlow, flow_values
+from .process import ProcessFit, box_process, fit_for, load_fits
 from .ratings import Rows, Targets
 
 LUCK_SCHEMA = pa.schema(
@@ -73,6 +74,9 @@ LUCK_SCHEMA = pa.schema(
         # where `luck` came from: the shot model (`SHOTS`, and what a row
         # from before this column is), or the box score (`BOX`)
         pa.field("source", pa.string()),
+        # points of the home margin the box score says won't carry over
+        # (`process.box_process`); empty for a game without both box scores
+        pa.field("process", pa.float32()),
     ]
 )
 
@@ -214,16 +218,21 @@ def with_season(
     day: Mapping[str, date],
     as_of: date | None = None,
     replace: bool = False,
+    finals: Mapping[str, tuple[int, int]] | None = None,
+    fits: Mapping[int, ProcessFit] | None = None,
 ) -> list[dict]:
     """The file's rows with what a season's plays and box scores add to the
-    shot model's luck: `flow`'s readings on every game that has them, and a
-    row of box-score luck (`box_luck`) for each game the file has none for.
+        shot model's luck: `flow`'s readings on every game that has them, the box
+        score's `process` reading on every game whose lines add up to its final
+    score (`finals`; none without them), with the season's rolling fit
+    (`fits`, the league's release unless given), and a
+        row of box-score luck (`box_luck`) for each game the file has none for.
 
-    Every game given is as known at one cut, so each column is centered
-    (`centered`) on its own home sides' average over them. A box-score row
-    is filed as of `as_of`, or the day after its game without one. `replace`
-    rebuilds the season: its box-score rows and flow readings are dropped
-    first, the shot model's luck kept.
+        Every game given is as known at one cut, so each column is centered
+        (`centered`) on its own home sides' average over them. A box-score row
+        is filed as of `as_of`, or the day after its game without one. `replace`
+        rebuilds the season: its box-score rows and flow readings are dropped
+        first, the shot model's luck kept.
     """
 
     def mine(row: dict) -> bool:
@@ -231,6 +240,7 @@ def with_season(
 
     if replace:
         known = [r for r in known if not (mine(r) and r.get("source") == BOX)]
+    lines = list(lines)
     have = {r["game_id"] for r in known if r["league"] == league}
     boxed = box_luck(lines, contexts)
     new = sorted(g for g in boxed if g not in have and g in day)
@@ -251,6 +261,9 @@ def with_season(
         column: centered(by_game, by_game, contexts)
         for column, by_game in flow_values(flows, league).items()
     }
+    fit = fit_for(load_fits(league) if fits is None else fits, season)
+    processed = box_process(lines, contexts, finals or {}, fit)
+    values["process"] = centered(processed, processed, contexts)
     return [
         with_flow([row], values, replace)[0] if mine(row) else row
         for row in merged_luck(known, added)

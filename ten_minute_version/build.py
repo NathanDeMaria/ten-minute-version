@@ -152,6 +152,13 @@ from ten_minute_version.priors import (
     player_ratings,
 )
 from ten_minute_version.probabilities import FEATURES, OnFloorModel
+from ten_minute_version.process import (
+    Rating,
+    fit_seasons,
+    season_sides,
+    with_ahead,
+    write_fits,
+)
 from ten_minute_version.ratings import (
     TARGETS,
     Design,
@@ -2740,6 +2747,7 @@ def _with_season_flow(
         day,
         as_of=cut,
         replace=cut is None,
+        finals=finals,
     )
 
 
@@ -2905,6 +2913,60 @@ def _chain_summary(errors: list[dict], baseline: list[dict]) -> None:
         )
 
 
+def process_fits(
+    league: str,
+    first: int = 2014,
+    last: int = 2026,
+    summaries: str = "./summaries",
+    out: str = "./team-ratings",
+):
+    """
+    The box-score process fits (`ten_minute_version.process`) for each season
+    in `first`-`last`, each on every season before it, into `releases/`:
+    commit what this changes. Reads the summaries and the team ratings
+    (`{out}/{league}_player_ratings.csv`, `team_ratings`), whose
+    expectation the fit measures games against; a season before the ratings
+    begin adds nothing to fit on. Run it at each rollover, so the new season
+    is read with the one just finished in its fit.
+    """
+    table = pyarrow.csv.read_csv(
+        Path(out) / f"{league}_player_ratings.csv",
+        convert_options=pyarrow.csv.ConvertOptions(column_types=TEAM_RATING_SCHEMA),
+    )
+    ratings: dict[str, list[Rating]] = {}
+    for row in sorted(table.to_pylist(), key=lambda r: r["as_of"]):
+        ratings.setdefault(row["team_id"], []).append(
+            Rating(row["as_of"], row["net"], row["pace"], row["home_edge"])
+        )
+    sides = []
+    for season in range(first, last):
+        contexts: dict[str, GameContext] = {}
+        lines: list[BoxLine] = []
+        day: dict[str, date] = {}
+        finals: dict[str, tuple[int, int]] = {}
+        for game_id, summary in read_summaries(summaries, league, season):
+            found, played, final = (
+                parse_context(game_id, summary),
+                game_date(summary),
+                final_score(summary),
+            )
+            if found is None or played is None or final is None:
+                continue
+            contexts[game_id], day[game_id], finals[game_id] = found, played, final
+            lines += parse_box_lines(game_id, summary)
+        found_sides = season_sides(season, lines, contexts, finals, day, ratings)
+        sides += found_sides
+        print(f"{league} {season}: {len(found_sides)} team-games", flush=True)
+    fits = fit_seasons(with_ahead(sides), range(first, last + 1))
+    for season, fit in sorted(fits.items()):
+        print(
+            f"  {season}: on {fit.rows} team-games; "
+            + " ".join(f"{s} {v:+.3f}" for s, v in fit.coef.items()),
+            flush=True,
+        )
+    print(f"wrote {write_fits(league, fits)}")
+
+
 # Every command, by the name the CLI (`build.py` at the repo root) runs it as.
 COMMANDS = {
     "stints": stints,
@@ -2929,6 +2991,7 @@ COMMANDS = {
     "team_ratings": team_ratings,
     "luck": luck,
     "flow": flow,
+    "process_fits": process_fits,
     "crowds": crowds,
     "live_kit": live_kit,
     "live": live,
