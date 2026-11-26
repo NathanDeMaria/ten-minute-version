@@ -63,6 +63,8 @@ from ten_minute_version.chain import (
     carry,
     chained_priors,
     chained_table,
+    league_settings,
+    possession_shares,
 )
 from ten_minute_version.chain import development as chain_development
 from ten_minute_version.context import (
@@ -1798,7 +1800,9 @@ def _chain_fits(
 
         outside = _outside_teams(tables, league, season)
 
-        def priors_for(box: np.ndarray, has: np.ndarray, end: bool = False):
+        def priors_for(
+            box: np.ndarray, has: np.ndarray, weight: np.ndarray, end: bool = False
+        ):
             if baseline:
                 return baseline_priors(design, box)
             return chained_priors(
@@ -1813,6 +1817,9 @@ def _chain_fits(
                 last_end,
                 end,
                 outside,
+                shares=possession_shares(design, weight)
+                if settings.role_offense or settings.role_defense
+                else None,
             )
 
         if season > first:
@@ -1821,8 +1828,10 @@ def _chain_fits(
             # the last week's plus the new rows'
             normal, before = None, np.zeros(len(rows), bool)
             for k, week in enumerate(data["weeks"][: weeks + 1]):
-                mean, pen = priors_for(week["box"], week["has_box"])
                 train = np.array([g in week["train"] for g in rows.game_id])
+                mean, pen = priors_for(
+                    week["box"], week["has_box"], rows.possessions * train
+                )
                 added = weighted_gram(design, rows.possessions * (train & ~before))
                 normal = added if normal is None else normal + added
                 before = train
@@ -1836,8 +1845,8 @@ def _chain_fits(
                     normal=normal,
                 )
                 yield _WeekFit(season, k, train, b, data, pen)
-        mean, pen = priors_for(data["box"], data["has_box"], end=True)
         w = rows.possessions.astype(float)
+        mean, pen = priors_for(data["box"], data["has_box"], w, end=True)
         b = solve(design, data["y"], w, pen, prior=mean)
         last_end = SeasonEnd.of(design, b)
         if not carry_home:
@@ -1869,6 +1878,9 @@ def chain(
     flat_sd: float = 0.0,
     program: float = 1.0,
     outside_sd: float = 10.0,
+    role_offense: float | None = None,
+    role_defense: float | None = None,
+    role_at_end: bool = False,
     carry_home: bool = True,
     write_ratings: bool = True,
     recruits: str = "./recruits",
@@ -1883,14 +1895,18 @@ def chain(
     it. `carry_home` starts each season at the last one's home edge, and
     `program` each team at that much of its last column; returners drift
     `week_drift_sd` per season in the weekly fits, `drift_sd` in the
-    season-end fit that's carried. Writes each
+    season-end fit that's carried. `role_offense` and `role_defense` are
+    the role slopes (`chain.ROLE`'s for the league unless given; 0 is off).
+    Real lineups mark a team down for the bench minutes of its blowouts, so
+    judge a role change on predictions from shares, not on these. Writes each
     prediction's error under `cache`, and -- the chain, unless
     `write_ratings` is off -- each season's ratings with their sds,
     chained_ratings.parquet next to its tables; prints the errors by week
     against the baseline's, if run. Run `chain_weeks` first (and
     `season_ratings`, for development).
     """
-    settings = ChainSettings(
+    settings = league_settings(
+        league,
         box_sd=box_sd,
         drift_sd=drift_sd,
         week_drift_sd=week_drift_sd,
@@ -1900,7 +1916,14 @@ def chain(
         flat_sd=flat_sd,
         program=program,
         outside_sd=outside_sd,
+        role_at_end=role_at_end,
     )
+    if role_offense is not None or role_defense is not None:
+        settings = dataclasses.replace(
+            settings,
+            role_offense=role_offense or 0.0,
+            role_defense=role_defense or 0.0,
+        )
     ratings = _rating_tables(league, tables)
     errors: list[dict] = []
 
@@ -1970,6 +1993,8 @@ def chain(
             + (f"-flat{flat_sd:g}" if flat_sd else "")
             + (f"-program{program:g}" if program else "")
             + (f"-outside{outside_sd:g}" if outside_sd != 10.0 else "")
+            + f"-role{settings.role_offense:g},{settings.role_defense:g}"
+            + ("-at-end" if settings.role_at_end else "")
             + ("" if carry_home else "-nohome")
         )
     )
@@ -2091,7 +2116,7 @@ def team_ratings(
     row_day = np.array([], object)
     generic = division_generics(league, first)
     for fit in _chain_fits(
-        league, ChainSettings(), first, last, weeks, recruits, tables, cache
+        league, league_settings(league), first, last, weeks, recruits, tables, cache
     ):
         if fit.week == 0:
             generic = division_generics(league, fit.season)
@@ -2235,7 +2260,7 @@ def live_kit(
     final: dict = {}
     for _ in _chain_fits(
         league,
-        ChainSettings(),
+        league_settings(league),
         first,
         season - 1,
         -1,
@@ -2323,7 +2348,7 @@ def live(
             "defense", r, season
         )
 
-    settings = ChainSettings()
+    settings = league_settings(league)
     played: dict[str, dict[str, float]] = {}
     games: dict[str, int] = {}
     pace: dict[str, float] = {}
@@ -2355,6 +2380,9 @@ def live(
                 frozen.grown,
                 frozen.last_end,
                 outside=_outside_teams(tables, league, season),
+                shares=possession_shares(
+                    design, (rows.possessions * train).astype(float)
+                ),
             )
             fitted_targets = targets(rows, shot_rows, before)
             y = TARGETS[target](fitted_targets)
