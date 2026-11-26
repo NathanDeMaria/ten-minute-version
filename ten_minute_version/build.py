@@ -116,6 +116,13 @@ from ten_minute_version.opponents import (
     outside_side,
     schedules,
 )
+from ten_minute_version.player_events import (
+    EVENT_SCHEMA,
+    box_agreement,
+    event_rows,
+    floor_possessions,
+    mark_box,
+)
 from ten_minute_version.players import (
     FIRST_SEASON,
     fitted_team_sides,
@@ -214,6 +221,53 @@ def stints(
     for name, table in tables._asdict().items():
         pq.write_table(table, directory / f"{name}.parquet", compression="zstd")
     print(json.dumps(checks(tables.stints, tables.games), indent=2))
+
+
+def events(
+    league: str,
+    season: int,
+    root: str = "./plays",
+    summaries: str = "./summaries",
+    tables: str = "./stints",
+):
+    """
+    Each player's events in each game of the season (`player_events`), with
+    his possessions on the floor from its stint and estimated rows:
+    events.parquet next to its tables. After `stints` and `estimated`.
+    Prints how often each count matches the game's box score.
+    """
+    directory = Path(tables) / f"league={league}" / f"season={season}"
+    contexts = read_context(summaries, league, season)
+    rows = pq.read_table(directory / "stints.parquet").to_pylist()
+    if (directory / "estimated.parquet").exists():
+        rows += pq.read_table(directory / "estimated.parquet").to_pylist()
+    possessions = floor_possessions(rows)
+    del rows
+    found = [
+        row
+        for game in read_games(root, league, season)
+        for row in event_rows(game, possessions, contexts.get(game.game_id))
+    ]
+    box = {
+        (line.game_id, line.athlete_id): line.stats
+        for line in read_box_lines(summaries, league, season)
+    }
+    mark_box(found, box)
+    table = pa.Table.from_pylist(found, schema=EVENT_SCHEMA)
+    pq.write_table(table, directory / "events.parquet", compression="zstd")
+    whole = [r for r in found if r["box_ok"]]
+    agreement = box_agreement(whole, box)
+    games = {r["game_id"]: r["box_ok"] for r in found}
+    flagged = sum(ok is False for ok in games.values())
+    print(
+        f"{league} {season}: {table.num_rows} player-games, wrote events.parquet;"
+        f" {flagged} of {len(games)} games off their box score (box_ok false)"
+    )
+    print(
+        f"    {'stat':5s} {'exact':>6s} {'total':>6s}  (events against the box score)"
+    )
+    for stat, (exact, total) in agreement.items():
+        print(f"    {stat:5s} {exact:6.1%} {total:6.3f}")
 
 
 def context(
@@ -3084,6 +3138,7 @@ def kit_process(
 # Every command, by the name the CLI (`build.py` at the repo root) runs it as.
 COMMANDS = {
     "stints": stints,
+    "events": events,
     "context": context,
     "ratings": ratings,
     "season_ratings": season_ratings,
