@@ -39,8 +39,14 @@ context:
 	uv run python build.py context $(ARGS)
 
 
-# Both, and the estimated possessions, for every league and season in
-# ./plays, with their checks.
+# Each player's events in each game (after stints and estimated), with how
+# often each count matches the box score.
+events:
+	uv run python build.py events $(ARGS)
+
+
+# Both, the estimated possessions and the events, for every league and
+# season in ./plays, with their checks.
 seasons:
 	for dir in plays/league=*/season=*; do \
 		league=$${dir#plays/league=}; league=$${league%%/*}; season=$${dir##*=}; \
@@ -48,6 +54,7 @@ seasons:
 		uv run python build.py stints --league $$league --season $$season && \
 		uv run python build.py context --league $$league --season $$season && \
 		uv run python build.py estimated --league $$league --season $$season && \
+		uv run python build.py events --league $$league --season $$season && \
 		uv run python build.py minutes --league $$league --season $$season || exit 1; \
 	done
 
@@ -146,4 +153,4 @@ fit:
 	uv run python build.py fit $(ARGS)
 
 
-.PHONY: plays summaries stints context seasons ratings estimated priors carryover carryovers season-ratings box-model recruits recruit-model preseasons chain-weeks newcomer-fits newcomer-prior chain calibrate evaluate fit
+.PHONY: plays summaries stints context events seasons ratings estimated priors carryover carryovers season-ratings box-model recruits recruit-model preseasons chain-weeks newcomer-fits newcomer-prior chain calibrate evaluate fit
