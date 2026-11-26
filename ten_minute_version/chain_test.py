@@ -5,13 +5,18 @@ import pyarrow as pa
 import pytest
 
 from .chain import (
+    ROLE,
     ChainSettings,
     PlayerState,
     SeasonEnd,
+    Shares,
     carry,
     chained_priors,
     chained_table,
     development,
+    league_settings,
+    possession_shares,
+    role_shift,
 )
 from .context import GameContext, Team
 from .posterior import Reported
@@ -283,3 +288,93 @@ def test_an_outside_teams_column_is_as_wide_as_outside_sd():
         design, 2024, {}, _newcomer, box, has, flat, outside=frozenset({team})
     )
     assert off[j] == pytest.approx(flat.team_penalty)
+
+
+def _rotation() -> tuple[Rows, Design]:
+    """A home side that plays "sub" for 2 of its 20 possessions, "starter"
+    for the other 18, and a generic visitor."""
+    keys = ("game_id", "stint", "offense_side", "offense_players", "defense_players")
+    four = ["h1", "h2", "h3", "h4"]
+    away = ["generic"]
+    table = pa.Table.from_pylist(
+        [
+            dict(zip(keys, ("g1", 1, "home", [*four, "sub"], away)))
+            | {"possessions": 2, "points": 2},
+            dict(zip(keys, ("g1", 2, "home", [*four, "starter"], away)))
+            | {"possessions": 18, "points": 20},
+            dict(zip(keys, ("g1", 2, "away", away, [*four, "starter"])))
+            | {"possessions": 20, "points": 15},
+        ]
+    )
+    team = lambda t: Team(t, t, None, None, True)  # noqa: E731
+    rows = Rows.build(
+        table, {"g1": GameContext("g1", False, False, team("H"), team("A"))}
+    )
+    return rows, Design.build(rows, teams=True)
+
+
+def test_possession_shares_are_of_the_team_on_the_rows_weighted():
+    rows, design = _rotation()
+    shares = possession_shares(design, rows.possessions.astype(float))
+    at = {p: shares.share[i] for i, p in enumerate(design.players)}
+    assert at["h1"] == pytest.approx(1.0)
+    assert at["sub"] == pytest.approx(0.1) and at["starter"] == pytest.approx(0.9)
+    assert np.isnan(at["generic"])
+    home = design.teams.index("H")
+    team = {p: shares.team[i] for i, p in enumerate(design.players)}
+    assert team["sub"] == home and team["generic"] == -1
+    # a row left out counts for nothing: "sub" hasn't played
+    weight = rows.possessions * np.array([0.0, 1.0, 1.0])
+    left = possession_shares(design, weight.astype(float))
+    assert np.isnan(left.share[design.players.index("sub")])
+    assert left.share[design.players.index("starter")] == pytest.approx(1.0)
+
+
+def test_a_small_share_moves_credit_from_a_player_to_his_teams_regulars():
+    rows, design = _rotation()
+    shares = possession_shares(design, rows.possessions.astype(float))
+    box = np.zeros(design.columns)
+    has = np.zeros(len(design.players), bool)
+    settings = replace(SETTINGS, role_offense=2.0, role_defense=1.0)
+    plain, _ = chained_priors(design, 2024, {}, _newcomer, box, has, settings)
+    moved, _ = chained_priors(
+        design, 2024, {}, _newcomer, box, has, settings, shares=shares
+    )
+    below = np.log(0.1 / 0.45)
+    average = 0.1 * below / 5  # shares add to 5
+    sub = design.player_column(design.players.index("sub"), "offense")
+    assert moved[sub] - plain[sub] == pytest.approx(0.02 * (below - average))
+    assert moved[sub + 1] - plain[sub + 1] == pytest.approx(0.01 * (below - average))
+    starter = design.player_column(design.players.index("starter"), "offense")
+    assert moved[starter] - plain[starter] == pytest.approx(-0.02 * average)
+    # the team's lineups, weighted by share, move not at all
+    offense = np.array(
+        [moved[2 * i] - plain[2 * i] for i in range(len(design.players))]
+    )
+    played = shares.team >= 0
+    assert (shares.share[played] * offense[played]).sum() == pytest.approx(0.0)
+    # the end fit only if asked
+    weekly = replace(settings, role_at_end=False)
+    end, _ = chained_priors(
+        design, 2024, {}, _newcomer, box, has, weekly, end=True, shares=shares
+    )
+    assert end[sub] == plain[sub]
+
+
+def test_role_shift_floors_small_shares_and_skips_who_hasnt_played():
+    settings = ChainSettings(role_full=0.5, role_floor=0.05)
+    shares = Shares(
+        np.array([0.01, 0.05, 0.25, 0.9, np.nan]), np.array([0, 0, 0, 0, -1])
+    )
+    below = np.array([np.log(0.1), np.log(0.1), np.log(0.5), 0.0])
+    weight = shares.share[:4]
+    expected = below - (weight * below).sum() / weight.sum()
+    assert role_shift(shares, settings) == pytest.approx([*expected, 0.0])
+
+
+def test_league_settings_has_each_leagues_role_slopes_and_keeps_them_weekly():
+    mens = league_settings("mens")
+    assert (mens.role_offense, mens.role_defense) == ROLE["mens"]
+    assert not mens.role_at_end
+    changed = league_settings("womens", gap=3)
+    assert changed.gap == 3 and changed.role_offense == ROLE["womens"][0]

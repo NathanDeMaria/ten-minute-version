@@ -71,10 +71,41 @@ per 100 per 100 days, both sides together) and unranked ones a little
 Letting older games count less (an exponential forgetting factor, as a
 random-walk Kalman filter would) did nothing at a 120-day memory and hurt
 at 60.
+
+**A player's role** says what his few possessions can't. A player who's
+barely played sits at his prior, against his team's column: at his team's
+level, give or take what's known of him. But a coach plays his best players
+most, so his bench is below his team's level, and the fit gave it his
+regulars' credit: each week's held-out lineups, per player on the floor
+against one with 45%+ of his team's possessions so far, came out (per 100,
+own offense less opponents', weeks 1-10 of 2014-2025)
+
+    share so far     <10%         10-20%       20-30%       30-45%
+    mens             -3.7 +- 0.3  -1.7 +- 0.2  -0.8 +- 0.2  -0.4 +- 0.1
+    womens           -4.9 +- 0.3  -2.9 +- 0.2  -1.7 +- 0.2  -1.1 +- 0.1
+
+and lineups of regulars alone 1.7 (mens) and 1.5 (womens) over, so the team
+as a whole was about right. Close to straight in log share, so each player's
+prior moves by a slope per side times log(share / 0.45) -- less his team's
+share-weighted average of it, or the team's level drops with its bench (that
+was worse every season) -- in the weekly fits only (`ChainSettings.role_*`,
+`ROLE`).
+
+It can't be scored against the lineups that played: a bench plays most when
+its team is far ahead, so marking a team down for its bench minutes marks
+it down in its blowout wins, and `chain`'s margin rmse goes up (mens 2014
+11.46 -> 11.53). Scored as a game is predicted -- each side at its players'
+shares so far, its rotation (20%+) as it played and its bench as usual,
+whoever played the game known but not how much -- weeks 1-10 of 2014-2025:
+mens 11.827 -> 11.812 (t -6.3, better in 12 of 12 seasons), womens 12.785
+-> 12.771 (t -4.3, 9 of 12); with a regular out, mens -0.021 and womens
+-0.030; with none, -0.011 and -0.005. Half the slopes do less (womens
+-0.009); half again more, a little more (mens -0.018, womens -0.016) at
+lower t, flattening -- the slopes as measured are kept.
 """
 
 from collections.abc import Callable, Collection, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import numpy as np
 import pyarrow as pa
@@ -125,6 +156,92 @@ class ChainSettings:
     # player does: 12.167 / 13.357. Division I's own games gain too (11.567
     # -> 11.558 mens, 12.675 -> 12.666 womens).
     generic_sd: float = 20.0
+    # A player's prior mean, per side, moved by his share of his team's
+    # possessions in the games so far (`possession_shares`): by `role_offense`
+    # and `role_defense` per 100 for each unit of log(share / `role_full`)
+    # below `role_full` (a share under `role_floor` counts as it), less his
+    # team's average of the same (`role_shift`), so a team's credit moves
+    # from its bench to its regulars and its usual lineup's sum stays put.
+    # Nothing for a player who hasn't played yet, or with every side at 0
+    # (the default: `league_settings` has each league's). See the module's
+    # docstring.
+    role_offense: float = 0.0
+    role_defense: float = 0.0
+    role_full: float = 0.45
+    role_floor: float = 0.03
+    # Whether the season-end fit, the one carried, moves its priors too. It
+    # shouldn't: a role doesn't carry as a rating does -- this season's
+    # bench freshman is next season's starter -- and carried, womens week-0
+    # rmse goes 15.42 -> 15.55.
+    role_at_end: bool = False
+
+
+# Each league's (role_offense, role_defense): the slopes of the held-out
+# residuals on log share, weeks 1-10 of 2014-2025 (see the module's docstring).
+ROLE = {"mens": (1.3, 0.35), "womens": (1.5, 0.9)}
+
+
+def league_settings(league: str, **changes) -> ChainSettings:
+    """The chain's settings for `league`: the defaults, its `ROLE` slopes,
+    and `changes`."""
+    offense, defense = ROLE[league]
+    return replace(ChainSettings(role_offense=offense, role_defense=defense), **changes)
+
+
+@dataclass(frozen=True)
+class Shares:
+    """Each of a design's players' share of his team's possessions, NaN for
+    one who hasn't played (or a generic one), and that team's index in the
+    design's teams, -1 for none."""
+
+    share: np.ndarray
+    team: np.ndarray
+
+
+def possession_shares(design: Design, weight: np.ndarray) -> Shares:
+    """
+    Each of `design`'s players' share of his team's offensive possessions,
+    over the rows `weight` (possessions, 0 for a row left out) counts: his
+    possessions on the floor over his team's, his team the one he was on
+    the floor for most.
+    """
+    players, teams = len(design.players), len(design.teams)
+    share, team = np.full(players, np.nan), np.full(players, -1)
+    if not teams:
+        return Shares(share, team)
+    x = design.matrix.tocsc()
+    on_floor = x[:, 0 : 2 * players : 2].tocsr()
+    on_offense = x[:, 2 * players : 2 * players + 2 * teams : 2].tocsr()
+    together = (on_floor.T @ on_offense.multiply(weight[:, None])).tocsr()
+    most = np.asarray(together.argmax(axis=1)).ravel()
+    own = on_floor.T @ weight
+    whole = (on_offense.T @ weight)[most]
+    played = (
+        (own > 0) & (whole > 0) & ~np.array([is_generic(p) for p in design.players])
+    )
+    share[played] = own[played] / whole[played]
+    team[played] = most[played]
+    return Shares(share, team)
+
+
+def role_shift(shares: Shares, settings: ChainSettings) -> np.ndarray:
+    """
+    Per player, how far below his team's regulars his share puts him -- log
+    of it over `role_full`, floored, capped at 0 -- less his team's average
+    of that, weighted by share: what moves off the bench goes to the
+    regulars, and a team's lineups on average move not at all. 0 for a
+    player who hasn't played.
+    """
+    played = shares.team >= 0
+    found = np.clip(shares.share[played], settings.role_floor, settings.role_full)
+    below = np.log(found / settings.role_full)
+    teams = shares.team[played]
+    weight = shares.share[played]
+    total = np.bincount(teams, weights=weight)
+    average = np.bincount(teams, weights=weight * below) / np.maximum(total, 1e-12)
+    out = np.zeros(len(shares.share))
+    out[played] = below - average[teams]
+    return out
 
 
 @dataclass(frozen=True)
@@ -225,6 +342,7 @@ def chained_priors(
     last: SeasonEnd = SeasonEnd(),
     end: bool = False,
     outside: Collection[str] = frozenset(),
+    shares: Shares | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """(prior mean, penalty) for every column of `design` in `season`: see
     the module's docstring. `box` is the box-score prior from the games so
@@ -235,7 +353,9 @@ def chained_priors(
     edge. A team starts at `program` of its last column. `end` is the
     season-end fit, the one carried: its returners drift by `drift_sd`,
     the weekly fits' by `week_drift_sd`. A team in `outside` (from outside
-    Division I) has its column at `outside_sd`, if set."""
+    Division I) has its column at `outside_sd`, if set. `shares`, if given,
+    are the players' shares of their teams' possessions so far
+    (`possession_shares`), to move their means by (`ChainSettings.role_*`)."""
     players = len(design.players)
     pen = penalties(design, player=1000.0, team=settings.team_penalty)
     mean = np.zeros(design.columns)
@@ -279,6 +399,11 @@ def chained_priors(
                 weight = 1 / var[c] + 1 / box_var
                 mean[c] = (mean[c] / var[c] + box[c] / box_var) / weight
                 var[c] = 1 / weight
+    if shares is not None and (settings.role_offense or settings.role_defense):
+        if not end or settings.role_at_end:
+            below = role_shift(shares, settings)
+            mean[0 : 2 * players : 2] += settings.role_offense / 100 * below
+            mean[1 : 2 * players : 2] += settings.role_defense / 100 * below
     pen[: 2 * players] = settings.sigma**2 / var
     return mean, pen
 
