@@ -27,6 +27,7 @@ from .chain import PlayerState, SeasonEnd
 from .preseason import History, MinutesModel
 from .process import ProcessFit
 from .ratings import Design
+from .skill_profile import ProfileState
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,10 @@ class LiveKit:
     # before it; None short of enough games, or in a kit from before it
     # carried one (unpickled, it reads the default)
     process: ProcessFit | None = None
+    # every player's skill profile at last season's end, which this season's
+    # targets start from (`skill_profile`); None in a kit from before it
+    # carried one, whose targets then shrink each shooter's skill alone
+    profile: ProfileState | None = None
 
 
 def prior_design(players: Iterable[str], teams: Iterable[str]) -> Design:

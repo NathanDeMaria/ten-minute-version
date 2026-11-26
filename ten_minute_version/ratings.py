@@ -43,6 +43,15 @@ from .shot_model import (
     shooter_skills,
     with_skill,
 )
+from .skill_profile import (
+    ProfileState,
+    SeasonEvents,
+    adjust_makes,
+    fit_population,
+    observe,
+    profiles,
+    shot_shift,
+)
 
 
 @dataclass(frozen=True)
@@ -331,11 +340,38 @@ class Targets:
         return sum(self.actual.values(), np.zeros_like(self.actual[2]))
 
 
-def targets(rows: Rows, shot_rows: Sequence[Mapping], train_games: set[str]) -> Targets:
+@dataclass(frozen=True)
+class ProfileInputs:
+    """What `targets` needs to give its shooters their skill profiles
+    (`skill_profile`): the season's events, and what last season left --
+    None in a first season, whose own games then set the population."""
+
+    events: SeasonEvents
+    carried: ProfileState | None
+
+
+def targets(
+    rows: Rows,
+    shot_rows: Sequence[Mapping],
+    train_games: set[str],
+    profile: ProfileInputs | None = None,
+) -> Targets:
     """
     The rows' targets, with the shot model and shooters' skills fitted on
     `train_games` only, so a held-out game's makes can't leak into the
     targets of the games it's scored against.
+
+    A shooter's skill is `shot_model.shooter_skills` -- each kind of shot
+    shrunk on its own -- unless `profile` is given: then it's his make rate
+    in the shot's zone from his skill profile (`skill_profile`), linked to
+    his other skills and carried from last season. Weeks 1-10 of 2014-2025,
+    scored from pregame shares, that makes ratings predict margins better:
+    mens 11.827 -> 11.814 (t -6.6, 12 of 12 seasons), womens 12.785 ->
+    12.773 (t -4.1, 9 of 12), week 0 too (-0.024, -0.018). A generic side's
+    pooled shooter has no profile and keeps his shrunk skill. Half the luck
+    is still the right amount to take out with the better skill: a quarter,
+    three quarters, all of it, or half of the two-point jumpers' as well,
+    were all worse in both leagues.
     """
     shots = Shots.from_rows(shot_rows)
     row_of = np.array(
@@ -362,6 +398,10 @@ def targets(rows: Rows, shot_rows: Sequence[Mapping], train_games: set[str]) -> 
     shrinkage = choose_shrinkage(shots.take(train), chance[train], half[train])
     skills = shooter_skills(shots.take(train), chance[train], shrinkage)
     skilled = with_skill(shots, chance, skills)
+    if profile is not None and train.any():
+        skilled = _profile_skilled(
+            shots, chance, train, train_games, generic, profile, skilled
+        )
 
     def per_row(points: np.ndarray, value: int) -> np.ndarray:
         keep = (row_of >= 0) & (shots.value == value)
@@ -374,6 +414,34 @@ def targets(rows: Rows, shot_rows: Sequence[Mapping], train_games: set[str]) -> 
         expected={v: per_row(shots.value * chance, v) for v in values},
         shooter={v: per_row(shots.value * skilled, v) for v in values},
     )
+
+
+def _profile_skilled(
+    shots: Shots,
+    chance: np.ndarray,
+    train: np.ndarray,
+    train_games: set[str],
+    generic: np.ndarray,
+    profile: ProfileInputs,
+    skilled: np.ndarray,
+) -> np.ndarray:
+    """`skilled` with every profiled shooter's shots at his profile's make
+    rate for the zone (a generic side's keep theirs)."""
+    if profile.carried is not None:
+        population = profile.carried.population
+    else:
+        athletes, offense, defense, op, dp = profile.events.totals(train_games)
+        x, den = observe(offense, defense, op, dp)
+        x, den = adjust_makes(x, den, athletes, shots, chance, train)
+        population = fit_population(x, den)
+    athletes, mean, _, _, _ = profiles(
+        profile.events, train_games, shots, chance, train, population, profile.carried
+    )
+    shift, profiled = shot_shift(shots, athletes, mean, population)
+    mine = profiled & ~generic
+    p = np.clip(chance, 1e-6, 1 - 1e-6)
+    shifted = 1 / (1 + np.exp(-(np.log(p / (1 - p)) + shift)))
+    return np.where(mine, shifted, skilled)
 
 
 def game_margins(

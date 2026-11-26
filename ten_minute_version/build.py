@@ -24,7 +24,7 @@ import traceback
 import urllib.error
 import zlib
 from collections import Counter
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
@@ -169,6 +169,7 @@ from ten_minute_version.process import (
 from ten_minute_version.ratings import (
     TARGETS,
     Design,
+    ProfileInputs,
     Rows,
     cross_validate,
     game_margins,
@@ -190,6 +191,12 @@ from ten_minute_version.recruiting import (
 from ten_minute_version.rosters import current as roster_current
 from ten_minute_version.rosters import fetch as fetch_roster
 from ten_minute_version.rosters import roster_rows, roster_table
+from ten_minute_version.shot_model import Shots, fit_shot_model
+from ten_minute_version.skill_profile import (
+    ProfileState,
+    read_season_events,
+    season_end,
+)
 from ten_minute_version.stints import season_tables
 from ten_minute_version.team_ratings import (
     TEAM_RATING_SCHEMA,
@@ -1579,6 +1586,7 @@ def chain_weeks(
     summaries: str = "./summaries",
     tables: str = "./stints",
     cache: str = CHAIN_WEEKS,
+    profile: bool = True,
 ):
     """
     Cache what `chain` and `newcomer_fits` read of each season: its rows and
@@ -1586,8 +1594,18 @@ def chain_weeks(
     its first `weeks` weeks the games before it, the week's games, and the
     targets and box-score priors from the games before it only. A few
     minutes a season.
+
+    With `profile`, each target's shooters have their skill profiles
+    (`ratings.targets`, `skill_profile`), carried season to season: each
+    season's cache keeps the profiles it started from ("profile") and the
+    ones it ends with ("profile_end"), which the next season -- run now or
+    later -- starts from. Needs every season's events (`events`).
     """
     box = BoxModel.load(league)
+    carried: ProfileState | None = None
+    if profile and first > 2013:
+        before = _load_chain_cache(cache, league, first - 1)
+        carried = before.get("profile_end") if before else None
     for season in range(first, last + 1):
         built = _season_rows(league, season, summaries, tables, with_estimated=True)
         if built is None:
@@ -1603,11 +1621,18 @@ def chain_weeks(
         games = sorted(set(rows.game_id))
         start = min(day[g] for g in games)
         lines = list(read_box_lines(summaries, league, season))
+        inputs = None
+        if profile:
+            if not (directory / "events.parquet").exists():
+                raise FileNotFoundError(
+                    f"no events.parquet for {league} {season}: run `build.py events` first"
+                )
+            inputs = ProfileInputs(read_season_events(tables, league, season), carried)
 
         def box_for(train: set[str]) -> tuple[np.ndarray, np.ndarray]:
-            profile = box_profile(lines, train)
-            seen = set(profile.players)
-            return box.prior(design, profile), np.array(
+            seen_box = box_profile(lines, train)
+            seen = set(seen_box.players)
+            return box.prior(design, seen_box), np.array(
                 [p in seen for p in design.players]
             )
 
@@ -1619,7 +1644,7 @@ def chain_weeks(
             if not test:
                 break
             if train:
-                y = TARGETS[target](targets(rows, shot_rows, train))
+                y = TARGETS[target](targets(rows, shot_rows, train, inputs))
                 mean, has = box_for(train)
             else:
                 y = np.zeros(len(rows))
@@ -1638,6 +1663,7 @@ def chain_weeks(
                 }
             )
         mean, has = box_for(set(games))
+        ended = _profile_end(rows, shot_rows, inputs) if inputs is not None else None
         path = _chain_cache(cache, league, season)
         path.parent.mkdir(parents=True, exist_ok=True)
         with path.open("wb") as file:
@@ -1647,14 +1673,30 @@ def chain_weeks(
                     "design": design,
                     "day": day,
                     "weeks": found,
-                    "y": TARGETS[target](targets(rows, shot_rows, set(games))),
+                    "y": TARGETS[target](targets(rows, shot_rows, set(games), inputs)),
                     "box": mean,
                     "has_box": has,
+                    "profile": carried,
+                    "profile_end": ended,
                 },
                 file,
                 protocol=5,
             )
+        carried = ended
         print(f"{league} {season}: {len(found)} weeks, wrote {path}", flush=True)
+
+
+def _profile_end(
+    rows: Rows, shot_rows: Sequence[Mapping], inputs: ProfileInputs
+) -> ProfileState:
+    """The profiles a season leaves the next (`skill_profile.season_end`),
+    make rates adjusted on a shot model of all its shots."""
+    shots = Shots.from_rows(shot_rows)
+    counted = np.array(
+        [(s["game_id"], s["stint"], s["offense_side"]) in rows.index for s in shot_rows]
+    )
+    chance = fit_shot_model(shots.take(counted)).chance(shots)
+    return season_end(inputs.events, shots, chance, counted, inputs.carried)
 
 
 def newcomer_fits(
@@ -2328,6 +2370,7 @@ def live_kit(
         },
         _division_one(last),
         _process_fit(league, season, summaries, ratings),
+        before.get("profile_end"),
     )
     _print_fit(league, season, kit.process)
     path = _kit_path(out, league, season)
@@ -2368,6 +2411,7 @@ def live(
         stints(league, season, root, summaries, tables)
         context(league, season, summaries, tables)
         estimated(league, season, root, summaries, tables)
+        events(league, season, root, summaries, tables)
     found = read_recruits(recruits, league)
     newcomer_prior_ = NewcomerPrior.load(league)
 
@@ -2410,7 +2454,12 @@ def live(
                 frozen.last_end,
                 outside=_outside_teams(tables, league, season),
             )
-            fitted_targets = targets(rows, shot_rows, before)
+            inputs = None
+            if frozen.profile is not None and (directory / "events.parquet").exists():
+                inputs = ProfileInputs(
+                    read_season_events(tables, league, season), frozen.profile
+                )
+            fitted_targets = targets(rows, shot_rows, before, inputs)
             y = TARGETS[target](fitted_targets)
             luck_path = Path(out) / f"{league}_luck.csv"
             known = read_luck(luck_path)
@@ -2711,13 +2760,16 @@ def luck(
     summaries: str = "./summaries",
     tables: str = "./stints",
     out: str = "./team-ratings",
+    cache: str = CHAIN_WEEKS,
 ):
     """
     Every game's shooting luck in `first`-`last` (`ten_minute_version.luck`),
     each from the first weekly cut after it -- the shot model and skills
     fitted on the games before that cut, as `chain_weeks` cuts them; a
     season's last games, after its last cut, from every game of it -- into
-    `{out}/{league}_luck.csv`, replacing those seasons' rows.
+    `{out}/{league}_luck.csv`, replacing those seasons' rows. Shooters'
+    skills are their profiles where the season's `chain_weeks` cache carries
+    them (and its events are built), as the ratings' targets have them.
     """
     path = Path(out) / f"{league}_luck.csv"
     rebuilt = set(range(first, last + 1))
@@ -2737,6 +2789,13 @@ def luck(
         games = sorted(set(rows.game_id))
         start = min(day[g] for g in games)
         done: set[str] = set()
+        cached = _load_chain_cache(cache, league, season) or {}
+        inputs = None
+        if "profile" in cached and (directory / "events.parquet").exists():
+            inputs = ProfileInputs(
+                read_season_events(tables, league, season), cached["profile"]
+            )
+        del cached
         for k in range(weeks + 2):
             cut = start + timedelta(days=7 * k)
             train = {g for g in games if day[g] < cut} if k <= weeks else set(games)
@@ -2745,7 +2804,7 @@ def luck(
             new = train - done
             if not new:
                 continue
-            fitted = targets(rows, shot_rows, train)
+            fitted = targets(rows, shot_rows, train, inputs)
             luck_so_far = game_luck(rows, fitted, train)
             found += luck_rows(
                 league,
@@ -3028,6 +3087,7 @@ def morning(
         stints(league, season, root, summaries, tables)
         context(league, season, summaries, tables)
         estimated(league, season, root, summaries, tables)
+        events(league, season, root, summaries, tables)
     played: set[str] = set()
     if (directory / "games.parquet").exists():
         day = {
