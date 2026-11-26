@@ -2,7 +2,17 @@ import numpy as np
 import pyarrow as pa
 
 from .context import GameContext, Team
-from .ratings import Design, Rows, game_margins, penalties, solve, targets
+from .player_events import DEFENSE, OFFENSE
+from .ratings import (
+    Design,
+    ProfileInputs,
+    Rows,
+    game_margins,
+    penalties,
+    solve,
+    targets,
+)
+from .skill_profile import DIMS, Population, ProfileState, SeasonEvents
 
 
 def _team(team_id: str) -> Team:
@@ -179,3 +189,56 @@ def test_a_generic_sides_shooters_are_one_shooter():
     away = ~np.asarray(rows.offense_home)
     expected, shooter = found.expected[3][away], found.shooter[3][away]
     assert shooter.mean() < expected.mean() - 0.5
+
+
+def test_a_profile_sets_its_shooters_skill_and_leaves_a_generic_sides_alone():
+    rng = np.random.default_rng(5)
+    games = [str(g) for g in range(1, 31)]
+    stints, shots = [], []
+    for g in games:
+        stints += [
+            (g, 1, "home", HOME, ["generic"], 10, 0),
+            (g, 1, "away", ["generic"], HOME, 10, 0),
+        ]
+        for i in range(20):
+            for side, shooter in (("home", HOME[i % 5]), ("away", f"x{g}-{i % 3}")):
+                shots.append(
+                    {
+                        "game_id": g,
+                        "stint": 1,
+                        "offense_side": side,
+                        "shooter": shooter,
+                        "value": 3,
+                        "made": bool(rng.random() < 0.35),
+                        "shot_type": "JumpShot",
+                        "x": 25.0,
+                        "y": float(rng.uniform(22.0, 26.0)),
+                    }
+                )
+    contexts = {g: GameContext(g, False, False, _team("H"), _team("G")) for g in games}
+    rows = Rows.build(_stints(stints), contexts)
+    # every home player's games in the event table: 4 threes a game, 10 possessions
+    made_three = OFFENSE.index("made_three_assisted")
+    missed_three = OFFENSE.index("missed_three")
+    pairs = [(g, p) for g in games for p in HOME]
+    offense = np.zeros((len(pairs), len(OFFENSE)))
+    offense[:, made_three], offense[:, missed_three] = 1.0, 3.0
+    events = SeasonEvents(
+        game=np.array([g for g, _ in pairs], object),
+        athlete=np.array([p for _, p in pairs], object),
+        offense=offense,
+        defense=np.zeros((len(pairs), len(DEFENSE))),
+        offense_possessions=np.full(len(pairs), 10.0),
+        defense_possessions=np.full(len(pairs), 10.0),
+    )
+    k = len(DIMS)
+    population = Population(np.full(k, 0.3), np.eye(k) * 0.002)
+    star = np.full(k, 0.3)
+    star[DIMS.index("three_pct")] = 0.6
+    carried = ProfileState(population, {"h1": (star, np.eye(k) * 1e-5)})
+    plain = targets(rows, shots, set(games))
+    profiled = targets(rows, shots, set(games), ProfileInputs(events, carried))
+    away = ~np.asarray(rows.offense_home)
+    assert np.allclose(profiled.shooter[3][away], plain.shooter[3][away])
+    assert np.allclose(profiled.actual[3], plain.actual[3])
+    assert profiled.shooter[3][~away].mean() > plain.shooter[3][~away].mean()
